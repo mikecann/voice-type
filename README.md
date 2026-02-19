@@ -4,6 +4,8 @@ Push-to-talk voice transcription that types directly into any focused window.
 Hold **Right Ctrl** while speaking, release to paste. Runs entirely locally —
 no cloud, no subscription.
 
+[![voice type](https://thumbs.video-to-markdown.com/dd2eac67.jpg)](https://youtu.be/lYjgJ8KIh-Y)
+
 ---
 
 ## Quick start
@@ -25,15 +27,15 @@ Right-click `C:\dev\tools\Voice Type.lnk` → **Pin to taskbar** for one-click l
 
 ## Usage
 
-| Action | What happens |
-|---|---|
-| Hold **Right Ctrl** | Recording starts — animated overlay appears at the bottom-centre of your monitor |
-| Keep holding | Waveform bars respond to your voice; partial transcription builds up below them |
-| Release **Right Ctrl** | Final transcription runs and text is pasted into the active window |
-| Right-click **tray icon** | Settings menu (see below) |
+| Action                    | What happens                                                                     |
+| ------------------------- | -------------------------------------------------------------------------------- |
+| Hold **Right Ctrl**       | Recording starts — animated overlay appears at the bottom-centre of your monitor |
+| Keep holding              | Waveform bars respond to your voice; partial transcription builds up below them  |
+| Release **Right Ctrl**    | Final transcription runs and text is pasted into the active window               |
+| Right-click **tray icon** | Settings menu (see below)                                                        |
 
-The text is pasted into whatever window had focus when you released the key —
-text editors, browsers, chat apps, terminals, etc.
+The text is injected into whatever window had focus when you released the key —
+text editors, browsers, chat apps, terminals, etc. Your clipboard is left untouched.
 
 ---
 
@@ -49,12 +51,12 @@ monitor containing the focused window**:
 └─┴──────────────────────────────────────┘
 ```
 
-| Element | Description |
-|---|---|
-| Coloured accent strip (left) | Red = recording, amber = transcribing |
-| `● REC` / `...` label | Current state |
-| Waveform bars | 7 bars that animate to your mic level in real time |
-| Partial text | Streaming preview — updates ~every 0.5 s as you speak |
+| Element                      | Description                                           |
+| ---------------------------- | ----------------------------------------------------- |
+| Coloured accent strip (left) | Red = recording, amber = transcribing                 |
+| `● REC` / `...` label        | Current state                                         |
+| Waveform bars                | 7 bars that animate to your mic level in real time    |
+| Partial text                 | Streaming preview — updates ~every 0.5 s as you speak |
 
 The overlay uses `WS_EX_NOACTIVATE` so it **never steals keyboard focus**.
 
@@ -64,21 +66,21 @@ The overlay uses `WS_EX_NOACTIVATE` so it **never steals keyboard focus**.
 
 A microphone icon sits in the system tray. Its colour reflects the current state:
 
-| Colour | State |
-|---|---|
+| Colour    | State                  |
+| --------- | ---------------------- |
 | Dark grey | Idle — ready to record |
-| Red | Recording |
-| Amber | Transcribing |
-| Very dark | Disabled |
+| Red       | Recording              |
+| Amber     | Transcribing           |
+| Very dark | Disabled               |
 
 **Right-click menu:**
 
-| Item | Description |
-|---|---|
-| **Enabled** ✓ | Toggle the tool on/off without killing the process |
-| **Open Log** | Opens `voice-type.log` in Notepad |
+| Item               | Description                                              |
+| ------------------ | -------------------------------------------------------- |
+| **Enabled** ✓      | Toggle the tool on/off without killing the process       |
+| **Open Log**       | Opens `voice-type.log` in Notepad                        |
 | **Run on Startup** | Add/remove from `HKCU\...\Run` (auto-start with Windows) |
-| **Exit** | Quit cleanly |
+| **Exit**           | Quit cleanly                                             |
 
 ---
 
@@ -93,8 +95,9 @@ A microphone icon sits in the system tray. Its colour reflects the current state
   overlay. This model is loaded as a separate instance so it never blocks
   the final transcription.
 - **Final transcription** — on key release, `small.en` (or `large-v3-turbo`
-  on CUDA) transcribes all recorded audio for accuracy. Result is copied to
-  clipboard and pasted via `Ctrl+V` (`keybd_event`).
+  on CUDA) transcribes all recorded audio for accuracy. Result is injected
+  directly into the focused window via `SendInput` with `KEYEVENTF_UNICODE`
+  flags — the clipboard is never touched.
 - **Two-model design** — `tiny.en` (~75 MB, ~0.1 s/pass) for live preview;
   `small.en` (~244 MB, ~0.5–1.5 s) for final. No lock contention, so the
   streaming never delays the paste.
@@ -111,10 +114,10 @@ A microphone icon sits in the system tray. Its colour reflects the current state
 
 ## Performance
 
-| Hardware | Final model | Typical post-release delay |
-|---|---|---|
-| CPU (any) | `small.en` | ~0.5–1.5 s depending on clip length |
-| NVIDIA GPU (CUDA) | `large-v3-turbo` | ~0.2 s |
+| Hardware          | Final model      | Typical post-release delay          |
+| ----------------- | ---------------- | ----------------------------------- |
+| CPU (any)         | `small.en`       | ~0.5–1.5 s depending on clip length |
+| NVIDIA GPU (CUDA) | `large-v3-turbo` | ~0.2 s                              |
 
 CUDA is auto-detected at startup (`ctranslate2.get_cuda_device_count()` +
 `cublas64_12.dll` load check). Falls back to CPU automatically.
@@ -128,23 +131,23 @@ Both models download once from HuggingFace on first use and are cached in
 
 Edit the constants near the top of `voice-type.py`:
 
-| Constant | Default | Description |
-|---|---|---|
-| `HOTKEY_VK` | `0xA3` | Virtual key for push-to-talk (Right Ctrl) |
-| `CPU_MODEL` | `"small.en"` | Final transcription model on CPU |
-| `GPU_MODEL` | `"large-v3-turbo"` | Final transcription model on CUDA |
-| `STREAM_MODEL` | `"tiny.en"` | Preview model (always CPU, separate instance) |
-| `STREAM_INTERVAL` | `0.5` | Seconds between streaming preview passes |
-| `DEVICE` | `None` | Mic device (`None` = system default) |
+| Constant          | Default            | Description                                   |
+| ----------------- | ------------------ | --------------------------------------------- |
+| `HOTKEY_VK`       | `0xA3`             | Virtual key for push-to-talk (Right Ctrl)     |
+| `CPU_MODEL`       | `"small.en"`       | Final transcription model on CPU              |
+| `GPU_MODEL`       | `"large-v3-turbo"` | Final transcription model on CUDA             |
+| `STREAM_MODEL`    | `"tiny.en"`        | Preview model (always CPU, separate instance) |
+| `STREAM_INTERVAL` | `0.5`              | Seconds between streaming preview passes      |
+| `DEVICE`          | `None`             | Mic device (`None` = system default)          |
 
 **Common hotkey alternatives:**
 
-| VK code | Key |
-|---|---|
-| `0xA5` | Right Alt |
-| `0x14` | Caps Lock |
-| `0x91` | Scroll Lock |
-| `0x7B` | F12 |
+| VK code | Key         |
+| ------- | ----------- |
+| `0xA5`  | Right Alt   |
+| `0x14`  | Caps Lock   |
+| `0x91`  | Scroll Lock |
+| `0x7B`  | F12         |
 
 ---
 
@@ -155,7 +158,6 @@ Installed automatically by `deps.ps1`:
 ```
 faster-whisper   speech-to-text engine (CTranslate2 backend)
 sounddevice      microphone capture
-pyperclip        clipboard write
 numpy            audio buffer maths
 Pillow           tray icon drawing
 pystray          system tray integration
@@ -165,10 +167,10 @@ pystray          system tray integration
 
 ## Files
 
-| File | Purpose |
-|---|---|
-| `voice-type.py` | Main script — all logic |
-| `voice-type.vbs` | Silent launcher (no console window) |
-| `voice-type.ps1` | PowerShell launcher called by the VBS |
-| `deps.ps1` | Installs Python dependencies |
+| File             | Purpose                                        |
+| ---------------- | ---------------------------------------------- |
+| `voice-type.py`  | Main script — all logic                        |
+| `voice-type.vbs` | Silent launcher (no console window)            |
+| `voice-type.ps1` | PowerShell launcher called by the VBS          |
+| `deps.ps1`       | Installs Python dependencies                   |
 | `voice-type.log` | Runtime log (gitignored, auto-rotates at 1 MB) |

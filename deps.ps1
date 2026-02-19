@@ -6,7 +6,6 @@ Write-Host "  [voice-type] Checking dependencies..." -ForegroundColor Cyan
 $packages = @(
     @{ import = "faster_whisper";  pip = "faster-whisper" },
     @{ import = "sounddevice";     pip = "sounddevice" },
-    @{ import = "pyperclip";       pip = "pyperclip" },
     @{ import = "numpy";           pip = "numpy" },
     @{ import = "PIL";             pip = "Pillow" },
     @{ import = "pystray";         pip = "pystray" }

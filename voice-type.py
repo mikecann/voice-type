@@ -6,7 +6,7 @@ as you talk. Release to paste the final text into the active window.
 
 A microphone icon lives in the system tray; right-click for settings and exit.
 
-Requirements: faster-whisper, sounddevice, pyperclip, numpy, Pillow, pystray
+Requirements: faster-whisper, sounddevice, numpy, Pillow, pystray
 """
 
 import os
@@ -65,7 +65,6 @@ log(f"=== voice-type started === log: {_LOG_PATH}")
 
 import numpy as np
 import sounddevice as sd
-import pyperclip
 from faster_whisper import WhisperModel
 
 # ---------------------------------------------------------------------------
@@ -99,9 +98,34 @@ COMPUTE_TYPE = "float16"  # float16 on GPU; overridden to int8 on CPU
 
 _user32 = ctypes.windll.user32
 
-_KEYEVENTF_KEYUP = 0x0002
-_VK_CONTROL      = 0x11
-_VK_V            = 0x56
+_KEYEVENTF_KEYUP    = 0x0002
+_KEYEVENTF_UNICODE  = 0x0004
+_VK_CONTROL         = 0x11
+_VK_V               = 0x56
+
+# SendInput structures for clipboard-free text injection
+_INPUT_KEYBOARD = 1
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk",         ctypes.c_ushort),
+        ("wScan",       ctypes.c_ushort),
+        ("dwFlags",     ctypes.c_uint32),
+        ("time",        ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.c_uint64),
+    ]
+
+class _INPUT_UNION(ctypes.Union):
+    _fields_ = [
+        ("ki",   _KEYBDINPUT),
+        ("_pad", ctypes.c_byte * 28),   # ensure union >= sizeof(MOUSEINPUT)
+    ]
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [
+        ("type",  ctypes.c_uint32),
+        ("union", _INPUT_UNION),
+    ]
 
 _REG_RUN  = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _REG_NAME = "VoiceType"
@@ -134,12 +158,32 @@ def _foreground_monitor_work_area() -> tuple[int, int, int, int]:
     return r.left, r.top, r.right, r.bottom
 
 
-def _send_ctrl_v():
-    _user32.keybd_event(_VK_CONTROL, 0, 0, 0)
-    _user32.keybd_event(_VK_V,       0, 0, 0)
-    time.sleep(0.05)
-    _user32.keybd_event(_VK_V,       0, _KEYEVENTF_KEYUP, 0)
-    _user32.keybd_event(_VK_CONTROL, 0, _KEYEVENTF_KEYUP, 0)
+def _send_text_input(text: str):
+    """Inject text via SendInput (KEYEVENTF_UNICODE) — clipboard is never touched."""
+    inputs = []
+    for ch in text:
+        code = ord(ch)
+        if code > 0xFFFF:
+            # Encode as surrogate pair for characters outside the BMP
+            code -= 0x10000
+            chars = [0xD800 | (code >> 10), 0xDC00 | (code & 0x3FF)]
+        else:
+            chars = [code]
+        for scan in chars:
+            for flags in (_KEYEVENTF_UNICODE, _KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP):
+                inp = _INPUT()
+                inp.type                 = _INPUT_KEYBOARD
+                inp.union.ki.wVk         = 0
+                inp.union.ki.wScan       = scan
+                inp.union.ki.dwFlags     = flags
+                inp.union.ki.time        = 0
+                inp.union.ki.dwExtraInfo = 0
+                inputs.append(inp)
+    if not inputs:
+        return
+    arr  = (_INPUT * len(inputs))(*inputs)
+    sent = ctypes.windll.user32.SendInput(len(inputs), arr, ctypes.sizeof(_INPUT))
+    log(f"SendInput: {sent}/{len(inputs) // 2} char events delivered")
 
 
 def _startup_enabled() -> bool:
@@ -733,11 +777,10 @@ def paste_text(text: str):
     hwnd = _user32.GetForegroundWindow()
     buf  = ctypes.create_unicode_buffer(256)
     _user32.GetWindowTextW(hwnd, buf, 256)
-    log(f"Pasting into {buf.value!r}: {text!r}")
-    pyperclip.copy(text)
-    time.sleep(0.1)
-    _send_ctrl_v()
-    time.sleep(0.15)
+    log(f"Injecting into {buf.value!r}: {text!r}")
+    time.sleep(0.05)
+    _send_text_input(text)
+    time.sleep(0.05)
 
 
 # ---------------------------------------------------------------------------
