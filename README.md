@@ -27,13 +27,36 @@ Right-click `C:\dev\tools\Voice Type.lnk` → **Pin to taskbar** for one-click l
 
 | Action | What happens |
 |---|---|
-| Hold **Right Ctrl** | Recording starts — red `● REC` overlay appears bottom-right |
-| Keep holding | Partial transcription builds up in the overlay as you speak |
-| Release **Right Ctrl** | Transcription finalises and text is pasted into the active window |
+| Hold **Right Ctrl** | Recording starts — animated overlay appears at the bottom-centre of your monitor |
+| Keep holding | Waveform bars respond to your voice; partial transcription builds up below them |
+| Release **Right Ctrl** | Final transcription runs and text is pasted into the active window |
 | Right-click **tray icon** | Settings menu (see below) |
 
-The tool types into whatever window had focus when you released the key —
+The text is pasted into whatever window had focus when you released the key —
 text editors, browsers, chat apps, terminals, etc.
+
+---
+
+## Overlay
+
+While recording a pill-shaped overlay appears at the **bottom-centre of the
+monitor containing the focused window**:
+
+```
+┌─┬──────────────────────────────────────┐
+│ │  ● REC  ▂▄█▇▄▆▂                    │
+│ │  "partial transcript text..."       │
+└─┴──────────────────────────────────────┘
+```
+
+| Element | Description |
+|---|---|
+| Coloured accent strip (left) | Red = recording, amber = transcribing |
+| `● REC` / `...` label | Current state |
+| Waveform bars | 7 bars that animate to your mic level in real time |
+| Partial text | Streaming preview — updates ~every 0.5 s as you speak |
+
+The overlay uses `WS_EX_NOACTIVATE` so it **never steals keyboard focus**.
 
 ---
 
@@ -45,7 +68,7 @@ A microphone icon sits in the system tray. Its colour reflects the current state
 |---|---|
 | Dark grey | Idle — ready to record |
 | Red | Recording |
-| Orange | Transcribing |
+| Amber | Transcribing |
 | Very dark | Disabled |
 
 **Right-click menu:**
@@ -65,29 +88,39 @@ A microphone icon sits in the system tray. Its colour reflects the current state
   keyboard hook is installed, so `Ctrl+C`, `Ctrl+V`, etc. are never affected.
 - **Audio capture** — `sounddevice` streams 16 kHz mono float32 from the
   default microphone into a NumPy buffer.
-- **Streaming preview** — while the key is held, a background thread
-  transcribes accumulated audio every 0.6 s and updates the overlay so you
-  can see words appear as you speak.
-- **Final transcription** — on key release a full transcription of all recorded
-  audio runs, ensuring accuracy. Result is copied to clipboard and pasted via
-  `Ctrl+V` (`keybd_event`).
-- **Model** — [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
-  (`small.en` on CPU, `large-v3-turbo` on CUDA). English-only, greedy decode
-  for maximum speed.
-- **Overlay** — `tkinter` frameless window with `WS_EX_NOACTIVATE` so it
-  never steals focus from the window you're typing into.
+- **Streaming preview** — while the key is held, a background thread uses
+  `tiny.en` to transcribe accumulated audio every 0.5 s and updates the
+  overlay. This model is loaded as a separate instance so it never blocks
+  the final transcription.
+- **Final transcription** — on key release, `small.en` (or `large-v3-turbo`
+  on CUDA) transcribes all recorded audio for accuracy. Result is copied to
+  clipboard and pasted via `Ctrl+V` (`keybd_event`).
+- **Two-model design** — `tiny.en` (~75 MB, ~0.1 s/pass) for live preview;
+  `small.en` (~244 MB, ~0.5–1.5 s) for final. No lock contention, so the
+  streaming never delays the paste.
+- **Monitor detection** — `MonitorFromWindow` + `GetMonitorInfoW` find the
+  work area of the monitor containing the focused window. The overlay is
+  centred at its bottom edge.
+- **Waveform animation** — the overlay canvas polls `Recorder.get_rms()` at
+  30 fps, driving 7 bottom-anchored bars with a smoothed exponential moving
+  average. A sine-sweep animation plays during transcription.
+- **Log rotation** — on startup, if `voice-type.log` exceeds 1 MB the file
+  is trimmed to the last 200 lines automatically.
 
 ---
 
 ## Performance
 
-| Hardware | Model | Typical transcription time |
+| Hardware | Final model | Typical post-release delay |
 |---|---|---|
-| CPU (any) | `small.en` | ~0.4 s for 3 s of speech |
-| NVIDIA GPU (CUDA) | `large-v3-turbo` | ~0.2 s for 3 s of speech |
+| CPU (any) | `small.en` | ~0.5–1.5 s depending on clip length |
+| NVIDIA GPU (CUDA) | `large-v3-turbo` | ~0.2 s |
 
-CUDA is auto-detected at startup. If `cublas64_12.dll` is not loadable it
-falls back to CPU automatically.
+CUDA is auto-detected at startup (`ctranslate2.get_cuda_device_count()` +
+`cublas64_12.dll` load check). Falls back to CPU automatically.
+
+Both models download once from HuggingFace on first use and are cached in
+`%USERPROFILE%\.cache\huggingface\`.
 
 ---
 
@@ -97,14 +130,21 @@ Edit the constants near the top of `voice-type.py`:
 
 | Constant | Default | Description |
 |---|---|---|
-| `HOTKEY_VK` | `0xA3` (Right Ctrl) | Virtual key code for push-to-talk |
-| `CPU_MODEL` | `"small.en"` | Whisper model used when no GPU |
-| `GPU_MODEL` | `"large-v3-turbo"` | Whisper model used when CUDA available |
-| `STREAM_INTERVAL` | `0.6` | Seconds between preview transcriptions |
+| `HOTKEY_VK` | `0xA3` | Virtual key for push-to-talk (Right Ctrl) |
+| `CPU_MODEL` | `"small.en"` | Final transcription model on CPU |
+| `GPU_MODEL` | `"large-v3-turbo"` | Final transcription model on CUDA |
+| `STREAM_MODEL` | `"tiny.en"` | Preview model (always CPU, separate instance) |
+| `STREAM_INTERVAL` | `0.5` | Seconds between streaming preview passes |
 | `DEVICE` | `None` | Mic device (`None` = system default) |
 
-Common hotkey alternatives: `0xA5` = Right Alt, `0x14` = Caps Lock,
-`0x91` = Scroll Lock.
+**Common hotkey alternatives:**
+
+| VK code | Key |
+|---|---|
+| `0xA5` | Right Alt |
+| `0x14` | Caps Lock |
+| `0x91` | Scroll Lock |
+| `0x7B` | F12 |
 
 ---
 
@@ -120,9 +160,6 @@ numpy            audio buffer maths
 Pillow           tray icon drawing
 pystray          system tray integration
 ```
-
-The Whisper model (~250 MB for `small.en`) downloads automatically on first
-use and is cached in `%USERPROFILE%\.cache\huggingface\`.
 
 ---
 
