@@ -13,6 +13,7 @@ import os
 import sys
 import time
 import math
+import json
 import winreg
 import threading
 import queue
@@ -91,6 +92,45 @@ CHANNELS     = 1
 DTYPE        = "float32"
 DEVICE       = None       # None = system default mic
 COMPUTE_TYPE = "float16"  # float16 on GPU; overridden to int8 on CPU
+
+# Models available in the tray settings menu.
+# Final model: accuracy matters most; stream model: speed matters most.
+FINAL_MODEL_OPTIONS  = ["tiny.en", "base.en", "small.en", "medium.en",
+                        "large-v2", "large-v3", "large-v3-turbo"]
+STREAM_MODEL_OPTIONS = ["tiny.en", "base.en", "small.en"]
+
+# ---------------------------------------------------------------------------
+# Settings (persisted to settings.json beside the script)
+# ---------------------------------------------------------------------------
+
+_SETTINGS_PATH = os.path.join(_SCRIPT_DIR, "settings.json")
+_settings: dict = {}
+
+
+def _load_settings():
+    """Load settings.json, filling missing keys with hardware-appropriate defaults."""
+    global _settings
+    if os.path.exists(_SETTINGS_PATH):
+        try:
+            with open(_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                _settings = json.load(f)
+        except Exception as e:
+            log(f"Settings load failed: {e}; using defaults.")
+            _settings = {}
+    # Defaults are resolved after CUDA detection so the right model is chosen.
+    cuda = _cuda_available()
+    _settings.setdefault("final_model",  GPU_MODEL if cuda else CPU_MODEL)
+    _settings.setdefault("stream_model", GPU_MODEL if cuda else STREAM_MODEL)
+    _save_settings()
+
+
+def _save_settings():
+    try:
+        with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(_settings, f, indent=2)
+    except Exception as e:
+        log(f"Settings save failed: {e}")
+
 
 # ---------------------------------------------------------------------------
 # Win32 helpers
@@ -246,10 +286,10 @@ def get_model() -> WhisperModel:
                 cuda   = _cuda_available()
                 device = "cuda" if cuda else "cpu"
                 ct     = COMPUTE_TYPE if cuda else "int8"
-                name   = GPU_MODEL if cuda else CPU_MODEL
-                log(f"Loading model {name!r} on {device} ({ct})...")
+                name   = _settings.get("final_model", CPU_MODEL)
+                log(f"Loading final model {name!r} on {device} ({ct})...")
                 _model = WhisperModel(name, device=device, compute_type=ct)
-                log("Model ready.")
+                log("Final model ready.")
     return _model
 
 
@@ -263,18 +303,45 @@ def get_stream_model() -> WhisperModel | None:
 
 
 def _load_stream_model():
-    """Load tiny.en in the background. Waits for the main model first to avoid
-    competing for CPU during the initial warm-up."""
+    """Load the stream model in the background. Waits for the final model first
+    to avoid competing for CPU during initial warm-up."""
     global _stream_model
-    get_model()   # ensure main model finishes first
+    get_model()   # ensure final model finishes first
     with _stream_model_lock:
         if _stream_model is None:
-            name = GPU_MODEL if _cuda_available() else STREAM_MODEL
-            device = "cuda" if _cuda_available() else "cpu"
-            ct     = COMPUTE_TYPE if _cuda_available() else "int8"
+            cuda   = _cuda_available()
+            name   = _settings.get("stream_model", STREAM_MODEL)
+            device = "cuda" if cuda else "cpu"
+            ct     = COMPUTE_TYPE if cuda else "int8"
             log(f"Loading stream model {name!r} on {device} ({ct})...")
             _stream_model = WhisperModel(name, device=device, compute_type=ct)
             log("Stream model ready.")
+
+
+def _set_final_model(name: str):
+    """Switch the final transcription model; reloads it in the background."""
+    global _model
+    if _settings.get("final_model") == name:
+        return
+    log(f"Final model switching to {name!r}...")
+    _settings["final_model"] = name
+    _save_settings()
+    with _model_lock:
+        _model = None
+    threading.Thread(target=get_model, daemon=True).start()
+
+
+def _set_stream_model(name: str):
+    """Switch the streaming preview model; reloads it in the background."""
+    global _stream_model
+    if _settings.get("stream_model") == name:
+        return
+    log(f"Stream model switching to {name!r}...")
+    _settings["stream_model"] = name
+    _save_settings()
+    with _stream_model_lock:
+        _stream_model = None
+    threading.Thread(target=_load_stream_model, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +413,40 @@ class TrayIcon:
     def start(self):
         import pystray
 
+        def _make_final_action(name):
+            return lambda: _set_final_model(name)
+
+        def _make_final_check(name):
+            return lambda item: _settings.get("final_model") == name
+
+        def _make_stream_action(name):
+            return lambda: _set_stream_model(name)
+
+        def _make_stream_check(name):
+            return lambda item: _settings.get("stream_model") == name
+
+        def _final_model_items():
+            return [
+                pystray.MenuItem(
+                    m,
+                    _make_final_action(m),
+                    checked=_make_final_check(m),
+                    radio=True,
+                )
+                for m in FINAL_MODEL_OPTIONS
+            ]
+
+        def _stream_model_items():
+            return [
+                pystray.MenuItem(
+                    m,
+                    _make_stream_action(m),
+                    checked=_make_stream_check(m),
+                    radio=True,
+                )
+                for m in STREAM_MODEL_OPTIONS
+            ]
+
         menu = pystray.Menu(
             pystray.MenuItem("Voice Type", None, enabled=False),
             pystray.Menu.SEPARATOR,
@@ -360,6 +461,9 @@ class TrayIcon:
                 self._toggle_startup,
                 checked=lambda item: _startup_enabled(),
             ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Final Model",  pystray.Menu(lambda: _final_model_items())),
+            pystray.MenuItem("Preview Model", pystray.Menu(lambda: _stream_model_items())),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", self._on_exit),
         )
@@ -638,21 +742,28 @@ class Overlay:
 # ---------------------------------------------------------------------------
 
 class Recorder:
+    """Keeps the microphone stream open permanently so there is no hardware
+    activation delay when the key is pressed.  Audio is only captured into
+    _frames while _recording is True."""
+
     def __init__(self):
-        self._frames: list[np.ndarray] = []
-        self._lock   = threading.Lock()
-        self._stream: sd.InputStream | None = None
+        self._frames:    list[np.ndarray] = []
+        self._lock       = threading.Lock()
+        self._recording  = False
+        info = sd.query_devices(DEVICE, "input")
+        log(f"Mic: {info['name']!r}")
+        # blocksize=256 → 16 ms per callback — low enough that the first
+        # captured block is ≤16 ms after the key goes down.
+        self._stream = sd.InputStream(
+            samplerate=SAMPLE_RATE, channels=CHANNELS, dtype=DTYPE,
+            device=DEVICE, callback=self._callback, blocksize=256,
+        )
+        self._stream.start()
 
     def start(self):
         with self._lock:
-            self._frames = []
-            info = sd.query_devices(DEVICE, "input")
-            log(f"Recording on: {info['name']!r}")
-            self._stream = sd.InputStream(
-                samplerate=SAMPLE_RATE, channels=CHANNELS, dtype=DTYPE,
-                device=DEVICE, callback=self._callback, blocksize=1024,
-            )
-            self._stream.start()
+            self._frames    = []
+            self._recording = True
 
     def peek(self) -> np.ndarray:
         """Non-destructive snapshot of all audio recorded so far."""
@@ -662,7 +773,7 @@ class Recorder:
             return np.concatenate(self._frames, axis=0).flatten()
 
     def get_rms(self) -> float:
-        """RMS of the last ~100 ms of audio — used to drive the waveform animation."""
+        """RMS of the last ~100 ms of audio — drives the waveform animation."""
         with self._lock:
             if not self._frames:
                 return 0.0
@@ -673,10 +784,7 @@ class Recorder:
 
     def stop(self) -> np.ndarray:
         with self._lock:
-            if self._stream:
-                self._stream.stop()
-                self._stream.close()
-                self._stream = None
+            self._recording = False
             if not self._frames:
                 return np.array([], dtype=np.float32)
             audio = np.concatenate(self._frames, axis=0).flatten()
@@ -689,7 +797,8 @@ class Recorder:
     def _callback(self, indata, frames, time_info, status):
         if status:
             log(f"Audio status: {status}")
-        self._frames.append(indata.copy())
+        if self._recording:
+            self._frames.append(indata.copy())
 
 
 # ---------------------------------------------------------------------------
@@ -790,6 +899,9 @@ def paste_text(text: str):
 # ---------------------------------------------------------------------------
 
 def run():
+    _load_settings()
+    log(f"Settings: final_model={_settings['final_model']!r}  stream_model={_settings['stream_model']!r}")
+
     recorder = Recorder()
     overlay  = Overlay(get_level=recorder.get_rms)
     streamer = StreamingTranscriber(recorder, overlay)
