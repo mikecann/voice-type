@@ -423,25 +423,27 @@ _MAX_PREVIEW_CHARS = 58
 
 
 def _wrap_preview(text: str) -> str:
-    """Trim and word-wrap to at most 2 lines of _MAX_PREVIEW_CHARS each."""
+    """Word-wrap text and show the last 2 lines so recent speech is always visible."""
     if not text:
         return ""
     words = text.split()
+    # Build all wrapped lines (no early exit)
     lines, current = [], ""
     for w in words:
         if current and len(current) + 1 + len(w) > _MAX_PREVIEW_CHARS:
             lines.append(current)
             current = w
-            if len(lines) == 2:
-                break
         else:
             current = (current + " " + w).lstrip()
-    if current and len(lines) < 2:
+    if current:
         lines.append(current)
-    result = "\n".join(lines)
-    if len(" ".join(words)) > len(result.replace("\n", " ")):
-        result = result.rstrip() + "…"
-    return result
+    if not lines:
+        return ""
+    # Show only the last 2 lines so the display tracks what you're currently saying.
+    # A leading "…" indicates earlier text is scrolled off.
+    visible = lines[-2:]
+    prefix = "…" if len(lines) > 2 else ""
+    return prefix + "\n".join(visible)
 
 
 class Overlay:

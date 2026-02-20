@@ -24,10 +24,20 @@ if (-not $python) {
 # Kill any existing voice-type instances before launching a fresh one.
 # This prevents stale instances (which install keyboard hooks) from
 # interfering with Ctrl+C, Ctrl+V, etc.
-Get-WmiObject Win32_Process | Where-Object {
-    $_.CommandLine -like "*voice-type.py*"
-} | ForEach-Object {
-    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+# Get-CimInstance is reliable on Win10/11; Get-WmiObject silently returns
+# nothing on newer builds because CommandLine is null via that provider.
+try {
+    Get-CimInstance Win32_Process | Where-Object {
+        $_.CommandLine -like "*voice-type.py*"
+    } | ForEach-Object {
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+} catch {
+    Get-WmiObject Win32_Process | Where-Object {
+        $_.CommandLine -like "*voice-type.py*"
+    } | ForEach-Object {
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Start-Process -FilePath $python `
