@@ -18,7 +18,7 @@ powershell -ExecutionPolicy Bypass -File .\voice-type\deps.ps1
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 # Or launch manually for testing
-wscript.exe "C:\dev\me\mikes-windows-tools\voice-type\voice-type.vbs"
+wscript.exe "C:\dev\me\mike-rosoft\voice-type\voice-type.vbs"
 ```
 
 Right-click `C:\dev\tools\Voice Type.lnk` → **Pin to taskbar** for one-click launch.
