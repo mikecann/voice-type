@@ -1,3 +1,5 @@
+![alt text](docs/ss1.png)
+
 # voice-type
 
 Push-to-talk voice transcription that types directly into any focused window.
