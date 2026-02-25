@@ -1,4 +1,4 @@
-![alt text](docs/ss1.png)
+![header](docs/header.png)
 
 # voice-type
 
