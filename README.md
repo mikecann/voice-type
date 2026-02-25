@@ -10,6 +10,12 @@ no cloud, no subscription.
 
 ---
 
+
+## Screenshots
+
+![voice-type screenshot](docs/ss1.png)
+
+
 ## Quick start
 
 ```powershell
