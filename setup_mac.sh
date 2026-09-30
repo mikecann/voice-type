@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # setup_mac.sh — install Python dependencies for voice-type on macOS.
-# Run once before first use:  bash tools/voice-type/setup_mac.sh
+# Run once before first use:  bash setup_mac.sh
 
 set -euo pipefail
 

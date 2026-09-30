@@ -1,6 +1,11 @@
-# voice-type/deps.ps1 — installs Python dependencies for voice-type.
+# deps.ps1 - installs Python dependencies for voice-type.
 # Idempotent: checks before installing.
 
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+    throw 'Python 3.10+ must be installed and on PATH.'
+}
+# Failed import probes are expected. Explicit throws below still stop installs.
+$ErrorActionPreference = 'Continue'
 Write-Host "  [voice-type] Checking dependencies..." -ForegroundColor Cyan
 
 $packages = @(
@@ -29,11 +34,11 @@ foreach ($pkg in $packages) {
         Write-Host "    OK  $($pkg.pip)" -ForegroundColor Green
     } else {
         Write-Host "    Installing $($pkg.pip)..." -ForegroundColor Yellow
-        pip install $pkg.pip --quiet
+        python -m pip install $pkg.pip --quiet
         if ($LASTEXITCODE -eq 0) {
             Write-Host "    OK  $($pkg.pip) (installed)" -ForegroundColor Green
         } else {
-            Write-Host "    FAILED  $($pkg.pip)" -ForegroundColor Red
+            throw "Failed to install $($pkg.pip). Resolve the pip error and rerun deps.ps1."
         }
     }
 }

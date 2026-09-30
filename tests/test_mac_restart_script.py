@@ -51,6 +51,7 @@ class MacRestartScriptTests(unittest.TestCase):
         env = dict(os.environ)
         env["PATH"] = f"{tmpdir}:{env['PATH']}"
         env["VOICE_TYPE_INSTALL_DIR"] = str(runtime)
+        env["VOICE_TYPE_LOG_DIR"] = str(pathlib.Path(tmpdir) / "logs")
         env["VOICE_TYPE_LAUNCH_AGENT_PATH"] = str(
             pathlib.Path(tmpdir) / "com.mikerosoft.voice-type.plist"
         )

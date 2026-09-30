@@ -63,7 +63,8 @@ codesign --force --deep --timestamp=none --sign - "$APP_DIR" >/dev/null
 touch "$APP_DIR"
 
 # Ask Launch Services and Spotlight to notice the newly staged bundle now.
-LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+# Allow packaging tests to replace desktop registration with a test double.
+LSREGISTER="${VOICE_TYPE_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}"
 if [[ -x "$LSREGISTER" ]]; then
   "$LSREGISTER" -f "$APP_DIR"
 fi

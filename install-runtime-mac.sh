@@ -34,12 +34,19 @@ done
 install -m 0644 \
   "$SOURCE_DIR/voice-type-launcher.c" \
   "$INSTALL_DIR/voice-type-launcher.c"
+install -m 0644 "$SOURCE_DIR/settings.example.json" "$INSTALL_DIR/settings.example.json"
 install -m 0644 "$SOURCE_DIR/icons/sound.png" "$INSTALL_DIR/icons/sound.png"
 
 # settings.json is user state once installed. Seed it on first install, but
 # never overwrite later changes when staging a new runtime.
 if [[ ! -f "$INSTALL_DIR/settings.json" ]]; then
-  install -m 0600 "$SOURCE_DIR/settings.json" "$INSTALL_DIR/settings.json"
+  # A development clone may already have personal settings. Otherwise seed
+  # from the tracked example and let the installed copy become user state.
+  SETTINGS_SOURCE="$SOURCE_DIR/settings.example.json"
+  if [[ -f "$SOURCE_DIR/settings.json" ]]; then
+    SETTINGS_SOURCE="$SOURCE_DIR/settings.json"
+  fi
+  install -m 0600 "$SETTINGS_SOURCE" "$INSTALL_DIR/settings.json"
 fi
 
 echo "Staged Voice Type runtime: $INSTALL_DIR"

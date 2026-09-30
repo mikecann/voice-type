@@ -5,6 +5,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 TOOLS_DIR = pathlib.Path(__file__).resolve().parents[1]
@@ -24,6 +25,13 @@ class TranscriptionHistoryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = load_module()
+
+    def setUp(self):
+        fixed_now = datetime(2026, 8, 4, 10, 0, tzinfo=timezone.utc)
+        clock = mock.patch.object(self.module, "datetime", wraps=datetime)
+        fake_datetime = clock.start()
+        fake_datetime.now.return_value = fixed_now
+        self.addCleanup(clock.stop)
 
     def test_append_returns_newest_first_and_ignores_blank_text(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -52,7 +52,7 @@ READY_POLL_SECONDS="${VOICE_TYPE_READY_POLL_SECONDS:-0.25}"
 
 if [[ ! -x "$LAUNCHER" || ! -x "$PYTHON" || ! -f "$APP" ]]; then
   echo "ERROR: the installed Voice Type runtime is incomplete at $INSTALL_DIR"
-  echo "Run setup first: bash tools/voice-type/setup_mac.sh"
+  echo "Run setup first: bash setup_mac.sh"
   exit 1
 fi
 

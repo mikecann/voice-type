@@ -605,7 +605,7 @@ def set_startup(enable: bool, vbs_path: str = "",
             setup_path = os.path.join(install_dir, "setup_mac.sh")
             message = (
                 f"voice-type launcher missing at '{launcher_bin}'. "
-                f"Run setup first from the repository: bash tools/voice-type/setup_mac.sh "
+                f"Run setup first from the repository: bash setup_mac.sh "
                 f"(installed helper: {setup_path})"
             )
             if log:
@@ -614,7 +614,7 @@ def set_startup(enable: bool, vbs_path: str = "",
         if not os.path.isfile(app_path):
             message = (
                 f"voice-type installed worker missing at '{app_path}'. "
-                "Run setup again: bash tools/voice-type/setup_mac.sh"
+                "Run setup again: bash setup_mac.sh"
             )
             if log:
                 log(message)
@@ -622,7 +622,7 @@ def set_startup(enable: bool, vbs_path: str = "",
         if not os.access(launch_wrapper, os.X_OK):
             message = (
                 f"voice-type launch wrapper missing at '{launch_wrapper}'. "
-                "Run setup again: bash tools/voice-type/setup_mac.sh"
+                "Run setup again: bash setup_mac.sh"
             )
             if log:
                 log(message)

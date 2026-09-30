@@ -1,82 +1,85 @@
-![header](docs/header.webp)
+# <img src="icons/sound.png" width="24" alt=""> voice-type
 
-# voice-type
+Hold a key, talk, let go, and your words get typed wherever you are
 
-Push-to-talk voice transcription that types directly into any focused window.
-Runs entirely locally, no cloud, no subscription.
+Windows · macOS
 
-- **Windows**: hold **Right Ctrl**, speak, release to paste
-- **macOS**: hold **F12** or **Right Ctrl**, speak, release to paste
-- **Apple Silicon macOS**: uses **MLX Whisper large-v3-turbo** for both live preview and final transcription when available
+<!-- media: hero
+![voice-type](docs/hero.png)
+media: hero -->
 
-[![voice type](https://thumbs.video-to-markdown.com/dd2eac67.jpg)](https://youtu.be/lYjgJ8KIh-Y)
+## What it is
 
----
+This is push-to-talk dictation that runs entirely on your own machine, so no cloud and no subscription. You hold the hotkey, a little pill appears at the bottom of the screen with a waveform and a rough preview of what you're saying, and when you let go the final text gets typed into whatever window has focus.
 
+It uses Whisper under the hood. On an NVIDIA GPU or an Apple Silicon Mac (via MLX) it's pretty quick, and on plain CPU it drops to smaller models so it still keeps up. It also leaves your clipboard alone, which I was quite happy about.
 
-## Screenshots
+[Watch the demo](https://youtu.be/lYjgJ8KIh-Y)
 
 ![voice-type screenshot](docs/ss1.png)
 
+## Get it
 
-## Quick start
+Paste this into your AI coding agent (Claude Code, Codex, Cursor...):
 
-### Prerequisites
+> Clone https://github.com/mikecann/voice-type and make it my own. It's one of Mike
+> Cann's personal tools, so read the README first, change anything specific to his
+> setup to suit mine, then help me get it running.
 
-- **Windows**: Python on `PATH`
-- **macOS**: Apple Silicon recommended if you want the MLX speedup
-- **macOS**: Homebrew installed
-- **Both**: internet access on first run so models can download from Hugging Face
+### Or set it up by hand
 
-### Windows
+Install Git and Python 3.10+ first. On macOS you'll also need Homebrew and Xcode
+Command Line Tools (`xcode-select --install`); Apple Silicon is recommended for MLX.
+Whisper and optional formatter models download on first use. No API keys or `.env`
+file are needed, and transcription runs locally once the models are cached.
+
+```sh
+git clone https://github.com/mikecann/voice-type.git
+cd voice-type
+```
+
+On Windows, run this from PowerShell:
 
 ```powershell
-# First time: install dependencies
-powershell -ExecutionPolicy Bypass -File .\tools\voice-type\deps.ps1
-
-# Add to taskbar / Start menu
 powershell -ExecutionPolicy Bypass -File .\install.ps1
-
-# Or launch manually for testing
-wscript.exe "C:\dev\me\mikerosoft.app\tools\voice-type\voice-type.vbs"
+# Launch silently, or use Voice Type from the Start menu
+wscript.exe .\voice-type.vbs
 ```
 
-Right-click `C:\dev\tools\Voice Type.lnk` → **Pin to taskbar** for one-click launch.
+The installer runs `deps.ps1` and creates `C:\dev\tools\Voice Type.lnk` plus
+Start menu entries named `Voice Type`, `VoiceType`, and `voice`, as in my setup.
+Right-click the shortcut in `C:\dev\tools` and pin it to the taskbar.
+Use `-ToolsDir 'D:\Tools'` for a different shortcut directory or `-SkipDeps` if
+dependencies are already installed. Keep the clone in place, Windows shortcuts
+launch its live files. NVIDIA machines also get the CUDA Python packages.
 
-### macOS
-
-Known-good path:
-
-- Apple Silicon Mac
-- Homebrew Python
-- run `setup_mac.sh`
-- grant permissions when macOS asks
-- launch with `voice-type-mac.sh`
+On macOS:
 
 ```bash
-# First time: create a venv and install dependencies
-bash tools/voice-type/setup_mac.sh
-
+bash install.sh
 # Launch or restart the background worker
-bash tools/voice-type/voice-type-mac.sh
-
+voice-type
 # Open settings
-bash tools/voice-type/open-settings-mac.sh
-
+bash open-settings-mac.sh
 # Diagnose startup and readiness
-bash tools/voice-type/voice-type-mac.sh status
+voice-type status
 ```
 
-On macOS, Spotlight can also open the settings app by typing `Voice Type`.
-`setup_mac.sh` builds a tiny native host so the worker appears as `Voice Type`,
-not `Python`, in Activity Monitor. It stages the runnable worker under
-`~/Library/Application Support/Voice Type`; the LaunchAgent never points into
-the repository or a temporary worktree. Runtime logs live under
-`~/Library/Logs/Voice Type`.
+`install.sh` runs `setup_mac.sh`, installs `~/Applications/Voice Type.app`, and
+links `voice-type` into `~/.local/bin`. Add that directory to your shell's PATH
+if it isn't already there, or use `bash voice-type-mac.sh` directly. You can
+choose another command directory with `bash install.sh /path/to/bin`.
 
-Voice Type follows the current macOS default input device. It refreshes the
-CoreAudio/PortAudio device list before each recording, so changing the default
-or disconnecting a USB microphone does not leave the old device cached.
+The macOS worker runs from `~/Library/Application Support/Voice Type`, with
+its virtual environment beside it. Logs live under `~/Library/Logs/Voice Type`.
+Spotlight opens settings when you search for `Voice Type`. After editing source,
+run `voice-type` again to stage the updated files and restart the worker.
+
+The example settings and the built-in microphone preference use my **Yeti Stereo
+Microphone**. Choose your microphone or **System Default** in Settings. The
+example selects `large-v3-turbo`; on a CPU-only machine, choose `small.en` for
+final transcription and `tiny.en` for preview. Existing settings are kept when
+you reinstall.
 
 ### Permissions on macOS
 
@@ -97,7 +100,7 @@ or the Python host it launched under.
 
 ---
 
-## Usage
+## Using it
 
 | Action | What happens |
 | --- | --- |
@@ -106,7 +109,7 @@ or the Python host it launched under.
 | Release the hotkey | Final transcription runs and text is pasted into the active window |
 | Open settings | On Windows use the tray icon, on macOS use Spotlight `Voice Type` or `open-settings-mac.sh` |
 
-The text is injected into whatever window had focus when you released the key —
+The text is injected into whatever window had focus when you released the key ,
 text editors, browsers, chat apps, terminals, etc. Your clipboard is left untouched.
 
 Hotkey by platform:
@@ -133,7 +136,7 @@ monitor containing the focused window**:
 | Coloured accent strip (left) | Red = recording, amber = transcribing                 |
 | `● REC` / `...` label        | Current state                                         |
 | Waveform bars                | 7 bars that animate to your mic level in real time    |
-| Partial text                 | Streaming preview — updates ~every 0.5 s as you speak |
+| Partial text                 | Streaming preview , updates ~every 0.5 s as you speak |
 
 The overlay is configured so it **never steals keyboard focus**.
 
@@ -147,7 +150,7 @@ A microphone icon sits in the system tray. Its colour reflects the current state
 
 | Colour    | State                  |
 | --------- | ---------------------- |
-| Dark grey | Idle — ready to record |
+| Dark grey | Idle , ready to record |
 | Red       | Recording              |
 | Amber     | Transcribing           |
 | Very dark | Disabled               |
@@ -170,7 +173,7 @@ A microphone icon sits in the system tray. Its colour reflects the current state
 macOS does not currently use the Windows tray flow.
 
 - Open settings via Spotlight by typing `Voice Type`
-- Or run `bash tools/voice-type/open-settings-mac.sh`
+- Or run `bash open-settings-mac.sh`
 - Click **History...** in Settings to open completed transcriptions. Clicking a
   row copies its full text to the clipboard.
 - The worker itself runs in the background via `voice-type-mac.sh`
@@ -187,49 +190,49 @@ macOS does not currently use the Windows tray flow.
 
 ## How it works
 
-- **Hotkey handling** — Windows polls `GetAsyncKeyState(VK_RCONTROL)` at 100 Hz.
+- **Hotkey handling** , Windows polls `GetAsyncKeyState(VK_RCONTROL)` at 100 Hz.
   macOS uses a native event tap for `F12` and Right Ctrl, suppressing whichever
   key is held so the system does not also handle it. Left Ctrl remains untouched.
-- **Audio capture** — `sounddevice` streams 16 kHz mono float32 from the
+- **Audio capture** , `sounddevice` streams 16 kHz mono float32 from the
   default microphone into a NumPy buffer.
-- **Streaming preview** — a background thread transcribes accumulated audio
+- **Streaming preview** , a background thread transcribes accumulated audio
   every 0.5 s and updates the overlay in every output mode. Accelerated systems
   default to `large-v3-turbo`; CPU-only systems use `tiny.en`.
-- **Final transcription** — on key release, the final model transcribes the
+- **Final transcription** , on key release, the final model transcribes the
   full audio for accuracy. On Windows this is `faster-whisper` on CPU or CUDA.
   On Apple Silicon macOS, `voice-type` prefers **MLX Whisper** for supported
   models, which makes both preview and final passes much faster than the
   previous CPU-only macOS path.
-- **Fast Final mode** — the accurate final model precomputes a growing
+- **Fast Final mode** , the accurate final model precomputes a growing
   transcript while the key is held. On release, only a short overlapping tail
   is transcribed. The transcripts are joined at a confirmed multi-word
   boundary; if Whisper revised the boundary around a pause or stutter, Voice
   Type falls back to a full pass instead of risking missing or duplicated text.
-- **Text injection** — Windows injects text via `SendInput` with
+- **Text injection** , Windows injects text via `SendInput` with
   `KEYEVENTF_UNICODE`. macOS re-activates the target app and pastes with an
   `NSPasteboard` + `Cmd+V` flow that restores every clipboard item and type,
   including screenshots, files, rich text, and an empty clipboard. The old
   clipboard only comes back once the target app has actually read the text.
   If it never reads it within 2 seconds, the paste didn't land: Voice Type
   plays a sound and leaves the text on the clipboard so `Cmd+V` pastes it.
-- **Optional transcript cleanup** — for `final_only`, `hybrid`, and
+- **Optional transcript cleanup** , for `final_only`, `hybrid`, and
   `precompute`, an optional local GGUF instruct model can lightly clean the
   final transcript before it is typed. Guardrails reject outputs that remove
   numbers, acronyms, URLs, or too much of the original wording, and the tool
   falls back to the raw transcript on validator failures, backend errors, or
   timeout. `stabilized` skips this step on purpose because it types partial
   segments before the full sentence exists.
-- **Hardware-aware model design** — Apple Silicon uses one warmed MLX
+- **Hardware-aware model design** , Apple Silicon uses one warmed MLX
   `large-v3-turbo` model for preview and final transcription, with serialized
   access when preview is enabled. CUDA uses turbo for both paths with separate
   CTranslate2 instances. CPU-only systems keep `tiny.en` for preview and
   `small.en` for the final pass.
-- **Monitor detection** — each platform finds the monitor containing the
+- **Monitor detection** , each platform finds the monitor containing the
   focused window, then centres the overlay at its bottom edge.
-- **Waveform animation** — the overlay canvas polls `Recorder.get_rms()` at
+- **Waveform animation** , the overlay canvas polls `Recorder.get_rms()` at
   30 fps, driving 7 bottom-anchored bars with a smoothed exponential moving
   average. A sine-sweep animation plays during transcription.
-- **Log rotation** — on startup, if `voice-type.log` exceeds 1 MB the file
+- **Log rotation** , on startup, if `voice-type.log` exceeds 1 MB the file
   is trimmed to the last 200 lines automatically.
 
 ---
@@ -238,7 +241,7 @@ macOS does not currently use the Windows tray flow.
 
 | Hardware | Final backend | Final model | Typical post-release delay |
 | --- | --- | --- | --- |
-| CPU (any) | `faster-whisper` | `small.en` | ~0.5–1.5 s depending on clip length |
+| CPU (any) | `faster-whisper` | `small.en` | ~0.5 to 1.5 s depending on clip length |
 | NVIDIA GPU (CUDA) | `faster-whisper` | `large-v3-turbo` | ~0.2 s |
 | Apple Silicon | `mlx-whisper` | `small.en` / `large-v3-turbo` | much faster than the old CPU-only macOS path, with `large-v3-turbo` now feeling comfortably usable |
 
@@ -264,9 +267,9 @@ machine after the model was warm:
 
 | Formatter model | Typical added latency | What happened |
 | --------------- | --------------------- | ------------- |
-| `Qwen2.5 0.5B`  | ~0.9–1.7 s            | Best latency/guardrail balance, now the default |
-| `Qwen2.5 1.5B`  | ~1.6–3.8 s            | Cleaner punctuation, but too eager to rewrite wording |
-| `SmolLM2 1.7B`  | ~2.1–3.9 s            | Usually left the text unchanged |
+| `Qwen2.5 0.5B`  | ~0.9 to 1.7 s            | Best latency/guardrail balance, now the default |
+| `Qwen2.5 1.5B`  | ~1.6 to 3.8 s            | Cleaner punctuation, but too eager to rewrite wording |
+| `SmolLM2 1.7B`  | ~2.1 to 3.9 s            | Usually left the text unchanged |
 
 That is why the formatter is **off by default**, and why the default model is
 the smaller `Qwen2.5 0.5B` rather than the stronger 1.5B model.
@@ -276,7 +279,9 @@ the smaller `Qwen2.5 0.5B` rather than the stronger 1.5B model.
 ## Configuration
 
 Use the Windows tray menu or the macOS settings window for normal configuration.
-The persisted settings live in `settings.json` beside the script.
+The persisted settings live in `settings.json` beside the worker: in the clone
+on Windows, or the installed runtime on macOS. `settings.example.json` seeds
+new installs; your edited `settings.json` is ignored by Git.
 
 Completed transcription text is also kept in a separate, durable history file
 (`transcription-history.jsonl` under Voice Type's application-data directory).
@@ -352,7 +357,7 @@ pyobjc-framework-Cocoa native macOS integration
 
 | File                  | Purpose                                                  |
 | --------------------- | -------------------------------------------------------- |
-| `voice-type.py`       | Main script — audio, tray UI, transcription, injection   |
+| `voice-type.py`       | Main script , audio, tray UI, transcription, injection   |
 | `speech_backends.py`  | Backend selection and the MLX Whisper adapter            |
 | `text_formatter.py`   | Local LLM formatting guardrails and GGUF backend         |
 | `benchmark_formatter.py` | Quick local benchmark for formatter model experiments |
@@ -368,3 +373,51 @@ pyobjc-framework-Cocoa native macOS integration
 | `voice-type-mac.sh`   | Verified macOS restart and status script                 |
 | `open-settings-mac.sh`| Opens the macOS settings window                          |
 | `~/Library/Logs/Voice Type/voice-type.log` | Runtime log, auto-rotates at 1 MB |
+
+
+## Development
+
+The test dependencies don't load speech models or need a microphone:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-test.txt
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+On Windows use `.venv\Scripts\python.exe` in place of `.venv/bin/python`.
+CI runs the portable suite on macOS, the Windows platform tests on Windows,
+and checks every PowerShell script and the shell launchers for syntax errors.
+The native Spotlight packaging test is opt-in on macOS:
+`VOICE_TYPE_TEST_NATIVE_APP=1 python3 -m unittest discover -s tests -p test_spotlight_app.py`.
+The existing native icon conversion currently fails with `Invalid Iconset` on
+this Mac; portable bundle tests use fake desktop commands instead.
+
+After a Windows code change, use `restart.bat` to kill the old worker and
+relaunch silently, then check `voice-type.log`. On macOS use `voice-type`
+and inspect `voice-type status` and `~/Library/Logs/Voice Type/voice-type.log`.
+Keep `com.mikerosoft.voice-type` as the macOS bundle and LaunchAgent identity
+so existing permission grants and login settings still work.
+
+## Uninstall
+
+On Windows, exit from the tray menu, then run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
+```
+
+Pass the same `-ToolsDir` if you chose a custom directory. This removes only
+shortcuts and the login entry that point at this clone. Your settings, history
+and models are retained. Unpin the taskbar shortcut manually if needed.
+
+On macOS, turn off **Run on Startup** in Settings and quit the worker. Remove
+the `voice-type` symlink from your command directory and move
+`~/Applications/Voice Type.app` to the Trash. The installed runtime, history
+and models remain available until you choose to remove them.
+
+## More tools
+
+You can find my other tools at [mikerosoft.app](https://mikerosoft.app).
+
+MIT licensed.
