@@ -109,7 +109,7 @@ or the Python host it launched under.
 | Release the hotkey | Final transcription runs and text is pasted into the active window |
 | Open settings | On Windows use the tray icon, on macOS use Spotlight `Voice Type` or `open-settings-mac.sh` |
 
-The text is injected into whatever window had focus when you released the key ,
+The text is injected into whatever window had focus when you released the key,
 text editors, browsers, chat apps, terminals, etc. Your clipboard is left untouched.
 
 Hotkey by platform:
@@ -136,7 +136,7 @@ monitor containing the focused window**:
 | Coloured accent strip (left) | Red = recording, amber = transcribing                 |
 | `● REC` / `...` label        | Current state                                         |
 | Waveform bars                | 7 bars that animate to your mic level in real time    |
-| Partial text                 | Streaming preview , updates ~every 0.5 s as you speak |
+| Partial text                 | Streaming preview, updates ~every 0.5 s as you speak |
 
 The overlay is configured so it **never steals keyboard focus**.
 
@@ -150,7 +150,7 @@ A microphone icon sits in the system tray. Its colour reflects the current state
 
 | Colour    | State                  |
 | --------- | ---------------------- |
-| Dark grey | Idle , ready to record |
+| Dark grey | Idle, ready to record |
 | Red       | Recording              |
 | Amber     | Transcribing           |
 | Very dark | Disabled               |
@@ -190,25 +190,25 @@ macOS does not currently use the Windows tray flow.
 
 ## How it works
 
-- **Hotkey handling** , Windows polls `GetAsyncKeyState(VK_RCONTROL)` at 100 Hz.
+- **Hotkey handling**: Windows polls `GetAsyncKeyState(VK_RCONTROL)` at 100 Hz.
   macOS uses a native event tap for `F12` and Right Ctrl, suppressing whichever
   key is held so the system does not also handle it. Left Ctrl remains untouched.
-- **Audio capture** , `sounddevice` streams 16 kHz mono float32 from the
+- **Audio capture**: `sounddevice` streams 16 kHz mono float32 from the
   default microphone into a NumPy buffer.
-- **Streaming preview** , a background thread transcribes accumulated audio
+- **Streaming preview**: a background thread transcribes accumulated audio
   every 0.5 s and updates the overlay in every output mode. Accelerated systems
   default to `large-v3-turbo`; CPU-only systems use `tiny.en`.
-- **Final transcription** , on key release, the final model transcribes the
+- **Final transcription**: on key release, the final model transcribes the
   full audio for accuracy. On Windows this is `faster-whisper` on CPU or CUDA.
   On Apple Silicon macOS, `voice-type` prefers **MLX Whisper** for supported
   models, which makes both preview and final passes much faster than the
   previous CPU-only macOS path.
-- **Fast Final mode** , the accurate final model precomputes a growing
+- **Fast Final mode**: the accurate final model precomputes a growing
   transcript while the key is held. On release, only a short overlapping tail
   is transcribed. The transcripts are joined at a confirmed multi-word
   boundary; if Whisper revised the boundary around a pause or stutter, Voice
   Type falls back to a full pass instead of risking missing or duplicated text.
-- **Text injection** , Windows injects text via `SendInput` with
+- **Text injection**: Windows injects text via `SendInput` with
   `KEYEVENTF_UNICODE`. macOS re-activates the target app and pastes with an
   `NSPasteboard` + `Cmd+V` flow that restores every clipboard item and type,
   including screenshots, files, rich text, and an empty clipboard. The old
@@ -228,17 +228,17 @@ macOS does not currently use the Windows tray flow.
   falls back to the raw transcript on validator failures, backend errors, or
   timeout. `stabilized` skips this step on purpose because it types partial
   segments before the full sentence exists.
-- **Hardware-aware model design** , Apple Silicon uses one warmed MLX
+- **Hardware-aware model design**: Apple Silicon uses one warmed MLX
   `large-v3-turbo` model for preview and final transcription, with serialized
   access when preview is enabled. CUDA uses turbo for both paths with separate
   CTranslate2 instances. CPU-only systems keep `tiny.en` for preview and
   `small.en` for the final pass.
-- **Monitor detection** , each platform finds the monitor containing the
+- **Monitor detection**: each platform finds the monitor containing the
   focused window, then centres the overlay at its bottom edge.
-- **Waveform animation** , the overlay canvas polls `Recorder.get_rms()` at
+- **Waveform animation**: the overlay canvas polls `Recorder.get_rms()` at
   30 fps, driving 7 bottom-anchored bars with a smoothed exponential moving
   average. A sine-sweep animation plays during transcription.
-- **Log rotation** , on startup, if `voice-type.log` exceeds 1 MB the file
+- **Log rotation**: on startup, if `voice-type.log` exceeds 1 MB the file
   is trimmed to the last 200 lines automatically.
 
 ---
@@ -363,7 +363,7 @@ pyobjc-framework-Cocoa native macOS integration
 
 | File                  | Purpose                                                  |
 | --------------------- | -------------------------------------------------------- |
-| `voice-type.py`       | Main script , audio, tray UI, transcription, injection   |
+| `voice-type.py`       | Main script: audio, tray UI, transcription, injection   |
 | `speech_backends.py`  | Backend selection and the MLX Whisper adapter            |
 | `text_formatter.py`   | Local LLM formatting guardrails and GGUF backend         |
 | `benchmark_formatter.py` | Quick local benchmark for formatter model experiments |
