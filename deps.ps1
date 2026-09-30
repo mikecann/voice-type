@@ -16,7 +16,11 @@ $packages = @(
     @{ import = "pystray";         pip = "pystray" },
     @{ import = "sherpa_onnx";     pip = "sherpa-onnx" },
     @{ import = "huggingface_hub"; pip = "huggingface_hub" },
-    @{ import = "llama_cpp";       pip = "llama-cpp-python" }
+    # llama-cpp-python has no prebuilt wheel on PyPI (source-only), so it needs
+    # a C/C++ compiler to build. It only backs the optional, off-by-default
+    # transcript formatter (see text_formatter.py), so a failed install here
+    # must not block the rest of setup or core dictation.
+    @{ import = "llama_cpp";       pip = "llama-cpp-python"; optional = $true }
 )
 
 if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
@@ -37,6 +41,9 @@ foreach ($pkg in $packages) {
         python -m pip install $pkg.pip --quiet
         if ($LASTEXITCODE -eq 0) {
             Write-Host "    OK  $($pkg.pip) (installed)" -ForegroundColor Green
+        } elseif ($pkg.optional) {
+            Write-Host "    WARNING  $($pkg.pip) failed to install. Skipping it; it only backs the optional formatter." -ForegroundColor Yellow
+            Write-Host "    Install it yourself later with: python -m pip install $($pkg.pip)" -ForegroundColor Yellow
         } else {
             throw "Failed to install $($pkg.pip). Resolve the pip error and rerun deps.ps1."
         }
