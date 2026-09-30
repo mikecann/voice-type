@@ -1,5 +1,5 @@
 import importlib.util
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import pathlib
 import sys
@@ -10,6 +10,10 @@ from unittest import mock
 
 TOOLS_DIR = pathlib.Path(__file__).resolve().parents[1]
 MODULE_PATH = TOOLS_DIR / "transcription_history.py"
+
+# A fixed "now" just after the timestamps these tests write, in their +08:00
+# zone, so the 30-day retention never expires them as the real date moves on.
+NOW = datetime(2026, 8, 4, 10, 0, tzinfo=timezone(timedelta(hours=8)))
 
 
 def load_module():
@@ -36,7 +40,7 @@ class TranscriptionHistoryTests(unittest.TestCase):
     def test_append_returns_newest_first_and_ignores_blank_text(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             history = self.module.TranscriptionHistory(
-                pathlib.Path(tmpdir) / "history.jsonl"
+                pathlib.Path(tmpdir) / "history.jsonl", clock=lambda: NOW
             )
 
             history.append("first recording", "final_only", created_at="2026-08-04T09:00:00+08:00")
@@ -56,14 +60,14 @@ class TranscriptionHistoryTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            entries = self.module.TranscriptionHistory(path).load()
+            entries = self.module.TranscriptionHistory(path, clock=lambda: NOW).load()
 
             self.assertEqual(["safe"], [item["text"] for item in entries])
 
     def test_retention_keeps_only_the_most_recent_entries(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             history = self.module.TranscriptionHistory(
-                pathlib.Path(tmpdir) / "history.jsonl", max_entries=2
+                pathlib.Path(tmpdir) / "history.jsonl", max_entries=2, clock=lambda: NOW
             )
 
             history.append("one", "final_only", created_at="2026-08-04T09:00:00+08:00")
@@ -118,7 +122,7 @@ class TranscriptionHistoryTests(unittest.TestCase):
                 '2026-08-04 09:12:00  Done (0.30s) [precompute]: "it\\\'s safe"\n',
                 encoding="utf-8",
             )
-            history = self.module.TranscriptionHistory(tmpdir / "history.jsonl")
+            history = self.module.TranscriptionHistory(tmpdir / "history.jsonl", clock=lambda: NOW)
 
             self.assertEqual(2, history.import_completed_log(log_path))
             self.assertEqual(0, history.import_completed_log(log_path))
@@ -135,7 +139,7 @@ class TranscriptionHistoryTests(unittest.TestCase):
                 "2026-08-04 09:10:00  Done (0.20s) [final_only]: 'hello'\n",
                 encoding="utf-8",
             )
-            history = self.module.TranscriptionHistory(tmpdir / "history.jsonl")
+            history = self.module.TranscriptionHistory(tmpdir / "history.jsonl", clock=lambda: NOW)
             history.append(
                 "hello",
                 "final_only",
