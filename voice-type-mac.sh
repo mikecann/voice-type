@@ -3,7 +3,14 @@
 
 set -u
 
-SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Follow links, since install.sh puts one at ~/.local/bin/voice-type.
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  target="$(readlink "$SOURCE")"
+  [[ "$target" == /* ]] || target="$(dirname "$SOURCE")/$target"
+  SOURCE="$target"
+done
+SOURCE_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 INSTALL_DIR="${VOICE_TYPE_INSTALL_DIR:-$HOME/Library/Application Support/Voice Type}"
 LOG_DIR="${VOICE_TYPE_LOG_DIR:-$HOME/Library/Logs/Voice Type}"
 LAUNCH_AGENT_PATH="${VOICE_TYPE_LAUNCH_AGENT_PATH:-$HOME/Library/LaunchAgents/com.mikerosoft.voice-type.plist}"

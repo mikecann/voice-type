@@ -21,6 +21,27 @@ class MacRestartScriptTests(unittest.TestCase):
         self.assertNotIn('pkill -f "$APP"', script)
         self.assertNotIn('pgrep -f "$APP"', script)
 
+    def test_runs_from_the_repo_when_called_through_a_link(self):
+        # install.sh links ~/.local/bin/voice-type to this script.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = pathlib.Path(tmpdir) / "repo"
+            repo.mkdir()
+            shutil.copy2(SCRIPT_PATH, repo / SCRIPT_PATH.name)
+            marker = pathlib.Path(tmpdir) / "staged"
+            self._write_command(repo, "install-runtime-mac.sh", f'touch "{marker}"\nexit 1\n')
+            bin_dir = pathlib.Path(tmpdir) / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "voice-type").symlink_to(repo / SCRIPT_PATH.name)
+            env = dict(os.environ)
+            env["VOICE_TYPE_INSTALL_DIR"] = str(pathlib.Path(tmpdir) / "runtime")
+            env["VOICE_TYPE_LOG_DIR"] = str(pathlib.Path(tmpdir) / "logs")
+
+            subprocess.run(
+                [str(bin_dir / "voice-type")], env=env, capture_output=True, check=False
+            )
+
+            self.assertTrue(marker.exists())
+
     def _write_command(self, directory, name, body):
         command = pathlib.Path(directory) / name
         command.write_text(f"#!/usr/bin/env bash\n{body}", encoding="utf-8")
