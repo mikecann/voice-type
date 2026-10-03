@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -26,6 +27,50 @@ class MicrophoneProbeResult:
     ready: bool
     device: InputDevice
     reason: str = ""
+
+
+class ReadinessNotice:
+    """Keep startup status off screen until the user tries to dictate.
+
+    Every wake restarts Voice Type, and the preferred microphone check can take
+    30 seconds away from the desk. Popping the overlay up each time gets in the
+    way, but a hotkey press that does nothing needs explaining, so the status
+    appears on the first press and stays until the worker is ready.
+    """
+
+    def __init__(
+        self,
+        *,
+        show: Callable[[str], None],
+        is_hotkey_down: Callable[[], bool],
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+        poll_seconds: float = 0.05,
+    ):
+        self._show = show
+        self._is_hotkey_down = is_hotkey_down
+        self._sleep = sleep
+        self._monotonic = monotonic
+        self._poll_seconds = poll_seconds
+        self._message = ""
+        self._revealed = False
+
+    def update(self, message: str) -> None:
+        self._message = message
+        if self._revealed:
+            self._show(message)
+
+    def wait(self, seconds: float) -> None:
+        """Sleep, showing the status as soon as the hotkey goes down."""
+        deadline = self._monotonic() + seconds
+        while True:
+            if not self._revealed and self._is_hotkey_down():
+                self._revealed = True
+                self._show(self._message)
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                return
+            self._sleep(min(self._poll_seconds, remaining))
 
 
 def list_input_devices(sounddevice) -> list[InputDevice]:

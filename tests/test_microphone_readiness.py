@@ -267,5 +267,77 @@ class MicrophoneReadinessTests(unittest.TestCase):
         sounddevice._initialize.assert_not_called()
 
 
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class ReadinessNoticeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_module()
+
+    def make_notice(self, hotkey_presses=()):
+        clock = FakeClock()
+        shown = []
+
+        def is_hotkey_down():
+            return any(start <= clock.now < end for start, end in hotkey_presses)
+
+        notice = self.module.ReadinessNotice(
+            show=shown.append,
+            is_hotkey_down=is_hotkey_down,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+        return notice, shown, clock
+
+    def test_status_stays_hidden_while_nobody_is_dictating(self):
+        notice, shown, _clock = self.make_notice()
+
+        notice.update("Waiting for Yeti Stereo Microphone... (29s)")
+        notice.wait(1.0)
+        notice.update("Waiting for Yeti Stereo Microphone... (28s)")
+        notice.wait(1.0)
+
+        self.assertEqual(shown, [])
+
+    def test_pressing_the_hotkey_shows_why_dictation_is_not_ready(self):
+        notice, shown, _clock = self.make_notice(hotkey_presses=[(0.5, 0.8)])
+
+        notice.update("Waiting for Yeti Stereo Microphone... (29s)")
+        notice.wait(1.0)
+
+        self.assertEqual(shown, ["Waiting for Yeti Stereo Microphone... (29s)"])
+
+    def test_status_keeps_updating_after_the_hotkey_is_released(self):
+        notice, shown, _clock = self.make_notice(hotkey_presses=[(0.5, 0.8)])
+
+        notice.update("Waiting for Yeti Stereo Microphone... (29s)")
+        notice.wait(1.0)
+        notice.update("Loading the speech model...")
+
+        self.assertEqual(
+            shown,
+            [
+                "Waiting for Yeti Stereo Microphone... (29s)",
+                "Loading the speech model...",
+            ],
+        )
+
+    def test_wait_sleeps_for_the_requested_time(self):
+        notice, _shown, clock = self.make_notice()
+
+        notice.wait(0.35)
+
+        self.assertAlmostEqual(clock.now, 0.35)
+
+
 if __name__ == "__main__":
     unittest.main()

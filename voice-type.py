@@ -269,6 +269,7 @@ from runtime_policy import (
 from audio_recovery import AudioBackendRecovery
 from microphone_readiness import (
     DEFAULT_MICROPHONE_NAME,
+    ReadinessNotice,
     input_device_options,
     microphone_candidate,
     probe_input_device,
@@ -2793,7 +2794,11 @@ def run():
                 if microphone_name
                 else "Checking the default microphone..."
             )
-            overlay.show_processing(initial_message)
+            notice = ReadinessNotice(
+                show=overlay.show_processing,
+                is_hotkey_down=platform.is_hotkey_down,
+            )
+            notice.update(initial_message)
             tray.set_state("processing")
             while True:
                 elapsed = time.monotonic() - readiness_started
@@ -2817,7 +2822,7 @@ def run():
                         channels=CHANNELS,
                         dtype=DTYPE,
                         duration_seconds=MICROPHONE_PROBE_SECONDS,
-                        sleep=time.sleep,
+                        sleep=notice.wait,
                     )
                     if probe.ready:
                         recorder.select_microphone(
@@ -2841,12 +2846,10 @@ def run():
                         1,
                         int(PREFERRED_MICROPHONE_WAIT_SECONDS - elapsed),
                     )
-                    overlay.show_processing(
-                        f"Waiting for {candidate}... ({remaining}s)"
-                    )
+                    notice.update(f"Waiting for {candidate}... ({remaining}s)")
                 else:
-                    overlay.show_processing("Waiting for the default microphone...")
-                time.sleep(MICROPHONE_RETRY_SECONDS)
+                    notice.update("Waiting for the default microphone...")
+                notice.wait(MICROPHONE_RETRY_SECONDS)
                 try:
                     refresh_audio_devices(sd)
                 except Exception as error:
@@ -2865,9 +2868,9 @@ def run():
                         "Final model failed to load; restarting Voice Type"
                     )
                     return
-                overlay.show_processing("Loading the speech model...")
+                notice.update("Loading the speech model...")
                 _write_heartbeat()
-                time.sleep(0.25)
+                notice.wait(0.25)
 
             overlay.hide()
             tray.set_state("idle")

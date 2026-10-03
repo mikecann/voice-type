@@ -184,6 +184,10 @@ macOS does not currently use the Windows tray flow.
 - Short sleep/wake cycles are detected from macOS lifecycle notifications.
   Dock/display changes are tracked, and the current default microphone is
   resolved again before the next recording.
+- After a wake, Voice Type gives your chosen microphone up to 30 seconds to
+  come back before falling back to the system default. It does this quietly.
+  If you press the hotkey before it's ready, the overlay shows what it's
+  waiting for.
 - Native model loading and final transcription have watchdog deadlines. If
   MLX/Metal stops responding, Voice Type writes a thread dump and lets launchd
   restart a fresh process instead of remaining stuck on Transcribing.
