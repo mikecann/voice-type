@@ -308,6 +308,7 @@ Useful keys:
 | `formatter_enabled`  | `false`          | Turn local transcript cleanup on/off |
 | `formatter_model`    | `"qwen2.5-0.5b"` | Local cleanup model preset |
 | `corrections`        | `{...}`          | Exact phrase replacements applied after transcription |
+| `vocabulary`         | `[...]`          | Names and jargon Whisper should expect, like `"Tailscale"` or `"Sammy Cam"`. They become Whisper's prompt, which also keeps capitals and punctuation on short dictations |
 
 If you want to tweak hardcoded behaviour, edit the constants near the top of
 `voice-type.py`:
