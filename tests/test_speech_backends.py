@@ -246,5 +246,106 @@ class SpeechBackendsTests(unittest.TestCase):
         self.assertEqual(1, max_active)
 
 
+def _speech(seconds: float, *, quiet_from: float | None = None, quiet_to: float | None = None):
+    import numpy as np
+
+    rate = 16000
+    audio = np.random.default_rng(0).uniform(-0.3, 0.3, int(seconds * rate)).astype(np.float32)
+    if quiet_from is not None:
+        audio[int(quiet_from * rate):int(quiet_to * rate)] = 0.0
+    return audio
+
+
+class VocabularyPromptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_module()
+
+    def test_prompt_lists_words_as_one_punctuated_sentence(self):
+        prompt = self.module.build_vocabulary_prompt(["Convex", " Tailscale ", "", "Convex", "Sammy Cam"])
+        self.assertEqual("Convex, Tailscale, Sammy Cam.", prompt)
+
+    def test_no_words_means_no_prompt(self):
+        self.assertIsNone(self.module.build_vocabulary_prompt([]))
+        self.assertIsNone(self.module.build_vocabulary_prompt(None))
+        self.assertIsNone(self.module.build_vocabulary_prompt(["  "]))
+
+    def test_audio_that_fits_one_whisper_window_is_not_split(self):
+        audio = _speech(30.0)
+        pieces = self.module.split_at_pauses(audio)
+        self.assertEqual(1, len(pieces))
+        self.assertEqual(len(audio), len(pieces[0]))
+
+    def test_long_audio_is_cut_in_the_pause(self):
+        import numpy as np
+
+        audio = _speech(45.0, quiet_from=24.0, quiet_to=24.5)
+        pieces = self.module.split_at_pauses(audio)
+        self.assertEqual(2, len(pieces))
+        self.assertGreaterEqual(len(pieces[0]) / 16000, 24.0)
+        self.assertLessEqual(len(pieces[0]) / 16000, 24.5)
+        np.testing.assert_array_equal(audio, np.concatenate(pieces))
+
+    def test_every_piece_fits_one_window_even_without_pauses(self):
+        import numpy as np
+
+        audio = _speech(95.0)
+        pieces = self.module.split_at_pauses(audio)
+        lengths = [len(piece) / 16000 for piece in pieces]
+        self.assertTrue(all(length <= 28.0 for length in lengths[:-1]), lengths)
+        self.assertLessEqual(lengths[-1], 30.0)
+        self.assertGreaterEqual(lengths[-1], 2.0)
+        np.testing.assert_array_equal(audio, np.concatenate(pieces))
+
+    def _fake_mlx(self, calls, texts=None):
+        texts = iter(texts or [])
+
+        def transcribe(audio, **kwargs):
+            calls.append({"seconds": len(audio) / 16000, **kwargs})
+            return {"text": next(texts, "hello"), "language": "en"}
+
+        return {
+            "mlx_whisper": SimpleNamespace(transcribe=transcribe),
+            "mlx": SimpleNamespace(core=SimpleNamespace(clear_cache=lambda: None)),
+        }
+
+    def test_mlx_transcribe_passes_the_prompt_to_whisper(self):
+        calls = []
+        with mock.patch.dict(sys.modules, self._fake_mlx(calls)):
+            model = self.module.MlxWhisperModel(repo_id="test/repo")
+            model.transcribe(_speech(3.0), language="en", initial_prompt="Convex, Tailscale.")
+
+        self.assertEqual(1, len(calls))
+        self.assertEqual("Convex, Tailscale.", calls[0]["initial_prompt"])
+
+    def test_mlx_transcribe_without_a_prompt_leaves_long_audio_to_whisper(self):
+        calls = []
+        with mock.patch.dict(sys.modules, self._fake_mlx(calls)):
+            model = self.module.MlxWhisperModel(repo_id="test/repo")
+            model.transcribe(_speech(45.0, quiet_from=24.0, quiet_to=24.5), language="en")
+
+        self.assertEqual(1, len(calls))
+        self.assertAlmostEqual(45.0, calls[0]["seconds"])
+        self.assertIsNone(calls[0]["initial_prompt"])
+
+    def test_mlx_transcribe_gives_the_prompt_to_every_window_of_long_audio(self):
+        # Whisper drops the initial prompt after its first 30 second window
+        # when condition_on_previous_text is off, so long dictations lost
+        # their capitals and punctuation part way through.
+        calls = []
+        fake = self._fake_mlx(calls, texts=["First part.", "Second part."])
+        with mock.patch.dict(sys.modules, fake):
+            model = self.module.MlxWhisperModel(repo_id="test/repo")
+            segments, _info = model.transcribe(
+                _speech(45.0, quiet_from=24.0, quiet_to=24.5),
+                language="en",
+                initial_prompt="Convex.",
+            )
+
+        self.assertEqual(2, len(calls))
+        self.assertEqual(["Convex.", "Convex."], [call["initial_prompt"] for call in calls])
+        self.assertEqual(["First part.", "Second part."], [segment.text for segment in segments])
+
+
 if __name__ == "__main__":
     unittest.main()

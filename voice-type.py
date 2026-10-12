@@ -281,6 +281,7 @@ from operation_watchdog import OperationWatchdog, finalization_timeout_seconds
 from recording_session import AudioFrameBuffer, RecordingSession
 from speech_backends import (
     MlxWhisperModel,
+    build_vocabulary_prompt,
     load_local_mlx_model,
     resolve_local_default_whisper_model,
     resolve_local_mlx_repo,
@@ -361,6 +362,14 @@ FORMATTER_MODEL_OPTIONS = list(FORMATTER_MODEL_PRESETS.keys())
 _SETTINGS_PATH = os.path.join(_SCRIPT_DIR, "settings.json")
 _settings: dict = {}
 
+# Names that come up again and again in the dictation history. Replace with
+# your own in settings.json.
+DEFAULT_VOCABULARY = [
+    "Convex", "Cannvas", "Claude", "Codex", "Tailscale", "Sammy Cam",
+    "worktrees", "PR", "Slack", "Notion", "Cloudflare", "Vercel",
+    "Supertonic", "Kokoro", "Tapo", "Parakeet", "Whisper",
+]
+
 if sys.platform == "darwin":
     _HISTORY_DIR = os.path.realpath(os.path.expanduser(os.environ.get(
         "VOICE_TYPE_DATA_DIR",
@@ -427,7 +436,14 @@ def _load_settings():
         "Q DA": "CUDA",
         "Kuda": "CUDA",
     })
+    # Names and jargon Whisper should expect. They become its initial prompt,
+    # which also keeps capitals and punctuation on short dictations.
+    _settings.setdefault("vocabulary", list(DEFAULT_VOCABULARY))
     _save_settings()
+
+
+def _whisper_prompt() -> str | None:
+    return build_vocabulary_prompt(_settings.get("vocabulary"))
 
 
 _settings_save_lock = threading.Lock()
@@ -2353,6 +2369,7 @@ def transcribe(
             vad_filter=False,
             beam_size=1,
             condition_on_previous_text=False,
+            initial_prompt=_whisper_prompt(),
         )
 
     if priority == "final":
@@ -2447,6 +2464,7 @@ class StreamingTranscriber:
                     lambda: model.transcribe(
                         audio, language="en", vad_filter=False,
                         beam_size=1, condition_on_previous_text=False,
+                        initial_prompt=_whisper_prompt(),
                     ),
                 )
                 if not ran or result is None:
