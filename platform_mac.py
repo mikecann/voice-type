@@ -365,6 +365,7 @@ _PASTE_FAILED_SOUND = "/System/Library/Sounds/Funk.aiff"
 _EDITABLE_ROLES = frozenset({"AXTextArea", "AXTextField", "AXComboBox"})
 _AX_TIMEOUT = 0.25     # per Accessibility call, so a busy app can't stall pasting
 _TEXT_BOX_WAIT = 0.5   # for an app to move a stray paste into its text box
+_REFOCUS_SETTLE = 0.15  # for a re-activated app to come to the front
 _FOCUS_POLL = 0.025
 
 
@@ -592,10 +593,11 @@ def inject_text(text: str, log: Callable[[str], None] | None = None) -> bool:
     import time
     from AppKit import NSPasteboard
 
-    # Re-activate the app that had focus when recording started.
-    # The overlay appearing may have moved focus away.
-    restore_target_app_focus()
-    time.sleep(0.15)  # wait for the app to actually come to front
+    # Re-activate the app that had focus when recording started, in case
+    # something else came to the front while the key was held.
+    refocused = restore_target_app_focus()
+    if refocused:
+        time.sleep(_REFOCUS_SETTLE)  # wait for the app to actually come to front
     focused_role = None
 
     def landed() -> bool:
@@ -624,7 +626,8 @@ def inject_text(text: str, log: Callable[[str], None] | None = None) -> bool:
     if log:
         log(f"NSPasteboard+Cmd+V: {len(text)} chars injected "
             f"(target read clipboard after {latency * 1000:.0f}ms, "
-            f"focus {focused_role or 'unknown'})")
+            f"focus {focused_role or 'unknown'}"
+            f"{', refocused target' if refocused else ''})")
     return True
 
 
@@ -640,14 +643,27 @@ def inject_backspaces(count: int, log: Callable[[str], None] | None = None) -> N
         log(f"CGEventPost: {count} backspace(s) injected")
 
 
-def restore_target_app_focus() -> None:
+def restore_target_app_focus(*, frontmost_pid: Callable[[], int | None] | None = None) -> bool:
+    """Bring the key-down app back to the front. Returns whether it had to.
+
+    The overlay never takes focus, so the app is usually still in front and
+    re-activating it would only add a wait before every paste.
+    """
     if _target_app is None:
-        return
+        return False
+    if frontmost_pid is None:
+        frontmost_pid = _frontmost_pid
+    try:
+        if frontmost_pid() == int(_target_app.processIdentifier()):
+            return False
+    except Exception:
+        pass
     try:
         _NSApplicationActivateIgnoringOtherApps = 1 << 1
         _target_app.activateWithOptions_(_NSApplicationActivateIgnoringOtherApps)
     except Exception:
-        pass
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
