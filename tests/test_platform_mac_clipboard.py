@@ -294,5 +294,56 @@ class FocusedTextBoxTests(unittest.TestCase):
         self.assertEqual((True, "AXTextArea"), result)
 
 
+class FakeApp:
+    def __init__(self, pid):
+        self.pid = pid
+        self.activations = 0
+
+    def processIdentifier(self):
+        return self.pid
+
+    def activateWithOptions_(self, _options):
+        self.activations += 1
+        return True
+
+
+class RestoreTargetFocusTests(unittest.TestCase):
+    """The overlay never takes focus, so the key-down app is usually still in
+    front at paste time. Re-activating it then cost a fixed 150 ms wait on
+    every dictation for nothing."""
+
+    def setUp(self):
+        self.module = load_module()
+
+    def test_target_already_in_front_is_left_alone(self):
+        self.module._target_app = app = FakeApp(42)
+
+        refocused = self.module.restore_target_app_focus(frontmost_pid=lambda: 42)
+
+        self.assertFalse(refocused)
+        self.assertEqual(0, app.activations)
+
+    def test_target_behind_another_app_is_brought_back(self):
+        self.module._target_app = app = FakeApp(42)
+
+        refocused = self.module.restore_target_app_focus(frontmost_pid=lambda: 7)
+
+        self.assertTrue(refocused)
+        self.assertEqual(1, app.activations)
+
+    def test_target_is_brought_back_when_the_front_app_is_unknown(self):
+        self.module._target_app = app = FakeApp(42)
+
+        refocused = self.module.restore_target_app_focus(frontmost_pid=lambda: None)
+
+        self.assertTrue(refocused)
+        self.assertEqual(1, app.activations)
+
+    def test_nothing_to_restore_without_a_target(self):
+        self.module._target_app = None
+
+        self.assertFalse(self.module.restore_target_app_focus(frontmost_pid=lambda: 7))
+
+
 if __name__ == "__main__":
     unittest.main()
