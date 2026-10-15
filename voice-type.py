@@ -263,7 +263,7 @@ from audio_gate import (
     should_skip_short_low_level_audio,
 )
 from runtime_policy import (
-    should_keep_mic_stream_open_local,
+    should_prepare_mic_stream_local,
     should_restart_after_loop_gap,
     should_stream_preview,
 )
@@ -279,6 +279,7 @@ from microphone_readiness import (
 )
 from process_relaunch import restart_current_process, validate_relauncher_files
 from operation_watchdog import OperationWatchdog, finalization_timeout_seconds
+from mic_stream import MicStream, OpenedStream
 from recording_session import AudioFrameBuffer, RecordingSession
 from speech_backends import (
     MlxWhisperModel,
@@ -1245,7 +1246,13 @@ def _build_control_state(tray) -> dict:
     selected_microphone = str(_settings.get("microphone_name", "")).strip()
     try:
         if sys.platform == "darwin":
-            refresh_audio_devices(sd)
+            # The recorder holds a prepared stream that PortAudio's refresh
+            # would free, so let it close and reopen the stream around it.
+            # While recording, the cached device list is used instead.
+            if _runtime_recorder is not None:
+                _runtime_recorder.refresh_devices()
+            else:
+                refresh_audio_devices(sd)
         microphone_options, live_microphones = input_device_options(
             sd,
             selected_microphone,
@@ -2258,22 +2265,27 @@ class Overlay:
 class Recorder:
     """Owns the microphone stream and captures audio while recording.
 
-    The microphone stream is opened on key-down and closed on key-up so the
-    system privacy indicator is only shown while actively recording.
+    The stream only runs while the key is held, so the system privacy
+    indicator is only shown while actively recording. On macOS it is opened
+    ahead of time so key-down only has to start it; see MicStream.
     """
 
     def __init__(self):
         self._capture = AudioFrameBuffer()
-        self._stream_error = False  # set on any callback status; triggers restart on next key press
-        self._keep_stream_open = should_keep_mic_stream_open_local()
         self._device_name = _settings.get("microphone_name") or DEVICE
         self._actual_device_name = ""
         self.audio_recovery = AudioBackendRecovery()
-        self._stream: sd.InputStream | None = None
-        if self._keep_stream_open:
-            self._open_stream()
+        # Off until startup's readiness probe is done with PortAudio, because
+        # its device refresh would free a prepared stream.
+        self._prepare_enabled = False
+        self._mic = MicStream(
+            open_stream=self._open_stream,
+            refresh_devices=lambda: refresh_audio_devices(sd),
+            run_bounded=self._run_bounded,
+            prepare_ahead=should_prepare_mic_stream_local(),
+        )
 
-    def _open_stream(self):
+    def _open_stream(self) -> OpenedStream:
         selected = resolve_recording_input(
             sd,
             preferred_name=self._device_name,
@@ -2282,76 +2294,77 @@ class Recorder:
         source_label = "system default" if not self._device_name else "selected"
         log(f"Mic ({source_label}): {selected.name!r}")
         # blocksize=256 → 16 ms per callback — low enough that the first
-        # captured block is ≤16 ms after the key goes down.
+        # captured block is ≤16 ms after the stream starts.
         stream = sd.InputStream(
             samplerate=SAMPLE_RATE, channels=CHANNELS, dtype=DTYPE,
             device=selected.index, callback=self._callback, blocksize=256,
         )
-        stream.start()
-        # Publish only a fully-started stream. If PortAudio raises above, the
-        # recorder remains cleanly disconnected and the process is relaunched.
-        self._stream = stream
         self._actual_device_name = selected.name
+        preferred = (self._device_name or "").strip()
+        return OpenedStream(
+            stream,
+            selected.name,
+            reusable=bool(preferred) and selected.name.casefold() == preferred.casefold(),
+        )
 
-    def select_microphone(self, name: str) -> None:
-        """Pin recordings to the microphone that passed the readiness probe."""
-        self._device_name = name
-
-    def _close_stream(self):
-        if self._stream is None:
-            return
+    def _run_bounded(self, fn) -> bool:
         # Stopping a PortAudio stream from a non-callback thread can deadlock
         # inside CoreAudio's HAL (lock-ordering race against the audio IO
         # thread). Run it on a throwaway thread with a timeout so a deadlock
-        # leaks one thread instead of wedging the whole app. The next
-        # _ensure_stream() will open a fresh stream.
-        stream = self._stream
-        self._stream = None
-
-        def _do_close():
+        # leaks one thread instead of wedging the whole app.
+        def _run():
             try:
-                stream.stop()
-                stream.close()
+                fn()
             except Exception as e:
-                log(f"Stream close error (ignored): {e}")
+                log(f"Stream stop/close error (ignored): {e}")
 
-        t = threading.Thread(target=_do_close, daemon=True,
+        t = threading.Thread(target=_run, daemon=True,
                              name="voice-type-stream-close")
         t.start()
         t.join(timeout=STREAM_CLOSE_TIMEOUT)
         if t.is_alive():
             self.audio_recovery.note_close_timeout()
-            log(f"Stream close timed out after {STREAM_CLOSE_TIMEOUT}s "
+            log(f"Stream stop/close timed out after {STREAM_CLOSE_TIMEOUT}s "
                 "(CoreAudio deadlock); backend is poisoned and Voice Type will "
                 "restart after finishing this dictation.")
-        else:
-            self.audio_recovery.note_close_finished()
+            return False
+        self.audio_recovery.note_close_finished()
+        return True
 
-    def _ensure_stream(self):
-        """Restart the audio stream if it's dead or errored.
+    def select_microphone(self, name: str) -> None:
+        """Pin recordings to the microphone that passed the readiness probe."""
+        if name != self._device_name:
+            self._device_name = name
+            self._mic.invalidate()
+            self.prepare()
 
-        Called on each key press. Handles suspend/resume and device resets -
-        after Windows wakes from sleep the portaudio device can silently die
-        while the sd.InputStream object still thinks it's active.
-        """
-        if self._stream is None:
-            self._open_stream()
-            self._stream_error = False
+    def invalidate_stream(self) -> None:
+        """Resolve the microphone again, e.g. after a dock change."""
+        self._mic.invalidate()
+
+    def enable_prepare(self) -> None:
+        self._prepare_enabled = True
+        self.prepare()
+
+    def prepare(self) -> None:
+        """Open the stream for the next key-down without turning the mic on."""
+        if not self._prepare_enabled or not self.audio_recovery.can_open_stream:
             return
-
-        needs_restart = self._stream_error or not self._stream.active
-        if not needs_restart:
-            return
-        reason = "error flag set" if self._stream_error else "stream inactive"
-        log(f"Audio stream needs restart ({reason}), reconnecting...")
-        self._close_stream()
         try:
-            self._open_stream()
-            self._stream_error = False
-            log("Audio stream restarted successfully.")
+            self._mic.prepare()
         except Exception as e:
-            log(f"Audio stream restart failed: {e}")
-            raise
+            # Not fatal: key-down opens a stream itself, as it used to.
+            log(f"Could not prepare the microphone stream: {e}")
+
+    def refresh_devices(self) -> bool:
+        """Refresh PortAudio's device list unless a recording is running."""
+        if not self._mic.refresh_devices():
+            return False
+        self.prepare()
+        return True
+
+    def has_audio(self) -> bool:
+        return self._capture.has_frames()
 
     def start(self):
         # A failed stream open must never leave an earlier dictation available
@@ -2360,18 +2373,20 @@ class Recorder:
         if not self.audio_recovery.can_open_stream:
             log("Recording ignored while automatic CoreAudio recovery is pending.")
             return False
+        # Mark before starting so the very first callback block is kept.
+        self._capture.mark_started()
         try:
-            self._ensure_stream()
+            reused = self._mic.start()
         except Exception as e:
-            self._stream = None
-            self._stream_error = True
+            self._capture.reset_for_start_attempt()
             self.audio_recovery.note_open_failure()
             log(
                 f"Microphone stream could not open: {e}. "
                 "Voice Type will restart automatically."
             )
             return False
-        self._capture.mark_started()
+        if not reused and should_prepare_mic_stream_local():
+            log("Mic stream was not prepared; opened it on key-down.")
         return True
 
     def peek(self) -> np.ndarray:
@@ -2398,8 +2413,7 @@ class Recorder:
         else:
             audio = np.concatenate(frames, axis=0).flatten()
 
-        if not self._keep_stream_open:
-            self._close_stream()
+        self._mic.stop()
 
         if len(audio) == 0:
             return audio
@@ -2413,7 +2427,7 @@ class Recorder:
     def _callback(self, indata, frames, time_info, status):
         if status:
             log(f"Audio status: {status}")
-            self._stream_error = True   # flag for restart on next key press
+            self._mic.note_error()   # open a fresh stream on the next key press
         self._capture.append(indata.copy())
 
 
@@ -2985,9 +2999,12 @@ def run():
 
             overlay.hide()
             tray.set_state("idle")
+        recorder.enable_prepare()
         log(f"Ready. Hold {_hotkey_label} to record.")
 
         was_down = False
+        awaiting_first_audio = False
+        first_audio_delay = None
         recording_session = RecordingSession()
         down_since = 0.0
         forced_stop = False
@@ -3019,6 +3036,8 @@ def run():
                         "will resolve the current system microphone."
                     )
                     last_display_generation = display_generation
+                    recorder.invalidate_stream()
+                    recorder.prepare()
 
             current_wall = time.time()
             if should_restart_after_loop_gap(
@@ -3066,10 +3085,13 @@ def run():
                     down_since = time.monotonic()
                     platform.snapshot_target_app()
                     tray.set_state("recording")
-                    overlay.show_rec()
                     started = recorder.start()
                     capture_ready_delay = time.monotonic() - down_since
                     recording_session.note_start_result(started)
+                    # The overlay waits for the first audio block, so it only
+                    # says "recording" once speech is actually being captured.
+                    awaiting_first_audio = started
+                    first_audio_delay = None
                     if started:
                         mode = _effective_output_mode()
                         # Output mode controls finalization and injection, not
@@ -3093,7 +3115,13 @@ def run():
                             )
                         )
 
+            elif is_down and awaiting_first_audio and recorder.has_audio():
+                awaiting_first_audio = False
+                first_audio_delay = time.monotonic() - down_since
+                overlay.show_rec()
+
             elif not is_down and was_down:
+                awaiting_first_audio = False
                 if recording_session.finish_on_release():
                     log("--- Key UP ---")
                     # Stop the streaming preview loop FIRST: if recorder.stop()
@@ -3114,6 +3142,7 @@ def run():
                         "preferred_microphone": _settings.get("microphone_name"),
                         "key_hold_seconds": key_hold_seconds,
                         "capture_ready_delay_seconds": capture_ready_delay,
+                        "first_audio_delay_seconds": first_audio_delay,
                         "formatter_enabled": bool(_settings.get("formatter_enabled")),
                         "vocabulary": list(_settings.get("vocabulary", [])),
                     }
@@ -3209,6 +3238,9 @@ def run():
                         daemon=True,
                         name="voice-type-finalize",
                     ).start()
+                    # Normally a no-op: the stream is kept for the next key-down.
+                    # Reopens it if a device change made it stale meanwhile.
+                    recorder.prepare()
                 elif tray.enabled:
                     log("--- Key UP ignored: recording never started ---")
 

@@ -36,6 +36,14 @@ class RecordingSessionTests(unittest.TestCase):
         self.assertTrue(session.finish_on_release())
         self.assertFalse(session.finish_on_release())
 
+    def test_has_frames_once_audio_arrives(self):
+        buffer = self.module.AudioFrameBuffer()
+        buffer.mark_started()
+
+        self.assertFalse(buffer.has_frames())
+        buffer.append("frame")
+        self.assertTrue(buffer.has_frames())
+
     def test_failed_start_clears_frames_from_previous_recording(self):
         buffer = self.module.AudioFrameBuffer()
         buffer.mark_started()

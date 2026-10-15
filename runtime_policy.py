@@ -7,12 +7,17 @@ WAKE_RESUME_GAP_SECONDS = 30.0
 PREVIEW_OUTPUT_MODES = frozenset({"final_only", "hybrid", "stabilized", "precompute"})
 
 
-def should_keep_mic_stream_open(platform_name: str) -> bool:
-    return False
+def should_prepare_mic_stream(platform_name: str) -> bool:
+    """Open the mic stream ahead of key-down without starting it.
+
+    Only the running stream shows the privacy indicator. This is checked on
+    macOS; Windows keeps opening the stream on key-down until it is tested.
+    """
+    return platform_name == "darwin"
 
 
-def should_keep_mic_stream_open_local() -> bool:
-    return should_keep_mic_stream_open(sys.platform)
+def should_prepare_mic_stream_local() -> bool:
+    return should_prepare_mic_stream(sys.platform)
 
 
 def should_stream_preview(output_mode: str) -> bool:
