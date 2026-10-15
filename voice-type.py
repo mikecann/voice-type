@@ -27,6 +27,7 @@ from tkinter import scrolledtext
 from tkinter import ttk
 
 from process_relaunch import command_targets_worker
+from recording_archive import RecordingArchive
 
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
@@ -382,10 +383,77 @@ else:
     )
 _HISTORY_PATH = os.path.join(_HISTORY_DIR, "transcription-history.jsonl")
 _transcription_history = TranscriptionHistory(_HISTORY_PATH)
+_recording_archive = RecordingArchive(os.path.join(_HISTORY_DIR, "recordings"))
+_recording_context = threading.local()
+
+
+def _update_recording(**fields) -> None:
+    recording_id = getattr(_recording_context, "recording_id", None)
+    if not recording_id:
+        return
+    try:
+        _recording_archive.update(recording_id, **fields)
+        if "status" in fields:
+            _recording_context.status = fields["status"]
+    except Exception as error:
+        log(f"Recording metadata update failed: {error}")
+
+
+def _save_recording(audio, *, metadata) -> str | None:
+    if not _settings.get("audio_recording_enabled", False):
+        return None
+    try:
+        recording_id = _recording_archive.save(
+            audio, sample_rate=SAMPLE_RATE, metadata=metadata,
+        )
+        log(f"Saved dictation audio: {recording_id}")
+        return recording_id
+    except Exception as error:
+        # A full or unavailable disk must not stop normal dictation.
+        log(f"Recording audio save failed: {error}")
+        return None
+
+
+def _cleanup_recordings() -> None:
+    try:
+        removed = _recording_archive.cleanup()
+        if removed:
+            log(f"Deleted {removed} expired recording archive file(s).")
+    except Exception as error:
+        log(f"Recording retention cleanup failed: {error}")
+
+
+def _recording_retention_worker() -> None:
+    # Cleanup also runs while idle. If the app was closed for days, startup
+    # immediately removes anything that expired while it wasn't running.
+    while True:
+        time.sleep(3600)
+        _cleanup_recordings()
+
+
+def _run_archived_finalization(audio, metadata, finish_job, watchdog) -> None:
+    watchdog.start()
+    try:
+        # Save before transcription, including silent/rejected clips, so errors
+        # or a native-model restart leave the original audio available.
+        _recording_context.recording_id = _save_recording(audio, metadata=metadata)
+        _recording_context.status = "captured"
+        finish_job()
+        if _recording_context.status == "captured":
+            _update_recording(status="finished_without_text")
+    except Exception as error:
+        _update_recording(status="finalization_error", error=str(error))
+        raise
+    finally:
+        _recording_context.recording_id = None
+        _inference_scheduler.cancel_finalization()
+        watchdog.complete()
+        _complete_finalization()
 
 
 def _remember_transcription(text: str, mode: str) -> None:
     """Persist completed text before injection so it remains recoverable."""
+    _update_recording(text=text, status="completed")
     try:
         _transcription_history.append(text, mode)
     except Exception as e:
@@ -425,6 +493,7 @@ def _load_settings():
     _settings.setdefault("output_mode",  "final_only")
     _settings.setdefault("microphone_name", DEFAULT_MICROPHONE_NAME)
     _settings.setdefault("formatter_enabled", False)
+    _settings.setdefault("audio_recording_enabled", False)
     _settings.setdefault("formatter_model", DEFAULT_FORMATTER_MODEL)
     _settings.setdefault("formatter_system_prompt", DEFAULT_FORMATTER_SYSTEM_PROMPT)
     if _settings.get("formatter_model") not in FORMATTER_MODEL_PRESETS:
@@ -1220,6 +1289,9 @@ def _build_control_state(tray) -> dict:
         "output_mode": _settings.get("output_mode"),
         "microphone_name": selected_option,
         "formatter_enabled": bool(_settings.get("formatter_enabled", False)),
+        "audio_recording_enabled": bool(_settings.get("audio_recording_enabled", False)),
+        "audio_recording_retention_days": _recording_archive.retention_days,
+        "audio_recording_directory": str(_recording_archive.path),
         "formatter_model": _settings.get("formatter_model"),
         "startup_enabled": platform.startup_enabled(_VBS_PATH),
         "log_path": _LOG_PATH,
@@ -1980,8 +2052,10 @@ class Overlay:
         ttk.Label(
             body,
             text=(
-                "Completed transcriptions are saved here. Voice Type does not "
-                "keep microphone audio. Click a row to copy its full text."
+                "Completed transcriptions are saved here. "
+                + ("Audio recordings are kept locally for 30 days. "
+                   if _settings.get("audio_recording_enabled") else "Audio recording is off. ")
+                + "Click a row to copy its full text."
             ),
             justify="left",
             wraplength=700,
@@ -2193,6 +2267,7 @@ class Recorder:
         self._stream_error = False  # set on any callback status; triggers restart on next key press
         self._keep_stream_open = should_keep_mic_stream_open_local()
         self._device_name = _settings.get("microphone_name") or DEVICE
+        self._actual_device_name = ""
         self.audio_recovery = AudioBackendRecovery()
         self._stream: sd.InputStream | None = None
         if self._keep_stream_open:
@@ -2216,6 +2291,7 @@ class Recorder:
         # Publish only a fully-started stream. If PortAudio raises above, the
         # recorder remains cleanly disconnected and the process is relaunched.
         self._stream = stream
+        self._actual_device_name = selected.name
 
     def select_microphone(self, name: str) -> None:
         """Pin recordings to the microphone that passed the readiness probe."""
@@ -2390,7 +2466,10 @@ def transcribe(
         text = seg.text.strip()
         if text:
             parts.append(text)
-    result = _apply_corrections(" ".join(parts).strip())
+    raw_transcript = " ".join(parts).strip()
+    result = _apply_corrections(raw_transcript)
+    if priority == "final":
+        _update_recording(raw_transcript=raw_transcript, decoded_text=result)
     if verbose:
         log(f"Transcribed {duration:.1f}s → {result!r}  "
             f"(lang={info.language} p={info.language_probability:.2f})")
@@ -2612,6 +2691,7 @@ def _finish_one_shot(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
         text = transcribe(audio, on_segment=on_seg)
     except Exception as e:
         log(f"Transcription error [{mode}]: {e}")
+        _update_recording(status="transcription_error", error=str(e))
         text = ""
 
     elapsed = time.perf_counter() - t0
@@ -2659,6 +2739,7 @@ def _finish_precompute(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
                 text = transcribe(audio)
     except Exception as e:
         log(f"Transcription error [precompute]: {e}")
+        _update_recording(status="transcription_error", error=str(e))
         text = ""
 
     elapsed = time.perf_counter() - t0
@@ -2703,6 +2784,7 @@ def _finish_stabilized(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
         full_text = transcribe(audio, on_segment=on_segment)
     except Exception as e:
         log(f"Transcription error [stabilized]: {e}")
+        _update_recording(status="transcription_error", error=str(e))
         overlay.hide()
         tray.set_state("idle")
         log(f"Done (error) [stabilized].")
@@ -2752,6 +2834,17 @@ def run():
     # window, before the hotkey loop takes over refreshing it.
     _write_heartbeat()
     _load_settings()
+    _cleanup_recordings()
+    threading.Thread(
+        target=_recording_retention_worker,
+        daemon=True,
+        name="voice-type-recording-retention",
+    ).start()
+    log(
+        f"Audio recording: {'enabled' if _settings.get('audio_recording_enabled') else 'disabled'}; "
+        f"retention={_recording_archive.retention_days} days; "
+        f"directory={_recording_archive.path}"
+    )
     try:
         imported = _transcription_history.import_completed_log(_LOG_PATH)
         if imported:
@@ -2975,6 +3068,7 @@ def run():
                     tray.set_state("recording")
                     overlay.show_rec()
                     started = recorder.start()
+                    capture_ready_delay = time.monotonic() - down_since
                     recording_session.note_start_result(started)
                     if started:
                         mode = _effective_output_mode()
@@ -3010,7 +3104,19 @@ def run():
                     # preview/precompute work is dropped, so only an already
                     # running pass can delay final transcription.
                     _inference_scheduler.request_finalization()
+                    key_hold_seconds = time.monotonic() - down_since
                     audio = recorder.stop()
+                    recording_metadata = {
+                        "mode": _effective_output_mode(),
+                        "final_model": _settings.get("final_model"),
+                        "stream_model": _settings.get("stream_model"),
+                        "microphone": recorder._actual_device_name,
+                        "preferred_microphone": _settings.get("microphone_name"),
+                        "key_hold_seconds": key_hold_seconds,
+                        "capture_ready_delay_seconds": capture_ready_delay,
+                        "formatter_enabled": bool(_settings.get("formatter_enabled")),
+                        "vocabulary": list(_settings.get("vocabulary", [])),
+                    }
                     mode = _effective_output_mode()
                     if mode == "precompute":
                         precomputer.stop(wait=PRECOMP_STOP_WAIT)
@@ -3037,6 +3143,7 @@ def run():
                             rms=rms,
                             peak=peak,
                         ):
+                            _update_recording(status="flatline_capture")
                             recorder.audio_recovery.note_flatline_capture()
                             overlay.show_processing(FLATLINE_RECOVERY_MESSAGE)
                             tray.set_state("processing")
@@ -3054,6 +3161,7 @@ def run():
                             rms=rms,
                             peak=peak,
                         ):
+                            _update_recording(status="skipped_low_level")
                             overlay.hide()
                             tray.set_state("idle")
                             log(
@@ -3095,20 +3203,9 @@ def run():
                         name="finalization",
                     )
 
-                    def _run_finish_with_watchdog():
-                        watchdog.start()
-                        try:
-                            finish_job()
-                        finally:
-                            # Early exits such as silent or flatline recordings
-                            # do not call transcribe(), so release final priority
-                            # here as a backstop for every finish path.
-                            _inference_scheduler.cancel_finalization()
-                            watchdog.complete()
-                            _complete_finalization()
-
                     threading.Thread(
-                        target=_run_finish_with_watchdog,
+                        target=_run_archived_finalization,
+                        args=(audio, recording_metadata, finish_job, watchdog),
                         daemon=True,
                         name="voice-type-finalize",
                     ).start()
