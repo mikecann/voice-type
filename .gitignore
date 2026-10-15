@@ -18,4 +18,5 @@ node_modules/
 settings.json
 settings.json.*.tmp
 transcription-history.jsonl*
+recordings/
 trusted-launcher-path

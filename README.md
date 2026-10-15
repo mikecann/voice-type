@@ -295,7 +295,16 @@ new installs; your edited `settings.json` is ignored by Git.
 
 Completed transcription text is also kept in a separate, durable history file
 (`transcription-history.jsonl` under Voice Type's application-data directory).
-Entries are retained for 30 days. Voice Type does not keep microphone audio.
+Entries are retained for 30 days. Microphone audio is not saved by default.
+
+For debugging misheard dictations, set `audio_recording_enabled` to `true` in
+`settings.json` and restart Voice Type. Every captured dictation is then saved
+locally in a `recordings` folder under the same application-data directory,
+including silent clips and failed transcriptions. Each float WAV preserves the
+samples given to the speech model. A matching JSON file holds the transcript,
+actual microphone, model settings and capture timing. Recordings are kept for
+30 days, with no count limit. Expired audio and matching metadata are deleted
+at startup and hourly while Voice Type runs. Nothing is uploaded.
 
 Useful keys:
 
@@ -306,6 +315,7 @@ Useful keys:
 | `output_mode`        | `"final_only"`   | Finalise strategy |
 | `microphone_name`    | `"Yeti Stereo Microphone"` | Input device selected in Settings. Choose System Default to follow the operating-system input |
 | `formatter_enabled`  | `false`          | Turn local transcript cleanup on/off |
+| `audio_recording_enabled` | `false`      | Save local audio and matching diagnostic metadata for 30 days |
 | `formatter_model`    | `"qwen2.5-0.5b"` | Local cleanup model preset |
 | `corrections`        | `{...}`          | Exact phrase replacements applied after transcription |
 | `vocabulary`         | `[...]`          | Names and jargon Whisper should expect, like `"Tailscale"` or `"Sammy Cam"`. They become Whisper's prompt, which also keeps capitals and punctuation on short dictations |
