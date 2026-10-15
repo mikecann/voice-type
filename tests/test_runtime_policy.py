@@ -22,14 +22,14 @@ class RuntimePolicyTests(unittest.TestCase):
     def setUpClass(cls):
         cls.module = load_module()
 
-    def test_windows_does_not_keep_mic_stream_open(self):
-        self.assertFalse(self.module.should_keep_mic_stream_open("win32"))
+    def test_macos_prepares_mic_stream_ahead_of_key_down(self):
+        self.assertTrue(self.module.should_prepare_mic_stream("darwin"))
 
-    def test_macos_does_not_keep_mic_stream_open(self):
-        self.assertFalse(self.module.should_keep_mic_stream_open("darwin"))
+    def test_windows_opens_mic_stream_on_key_down(self):
+        self.assertFalse(self.module.should_prepare_mic_stream("win32"))
 
-    def test_other_platforms_default_to_not_keeping_mic_open(self):
-        self.assertFalse(self.module.should_keep_mic_stream_open("linux"))
+    def test_other_platforms_open_mic_stream_on_key_down(self):
+        self.assertFalse(self.module.should_prepare_mic_stream("linux"))
 
     def test_final_only_still_streams_preview_text(self):
         # "Final only" controls when text is injected into the target app.

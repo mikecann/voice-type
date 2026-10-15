@@ -50,6 +50,10 @@ class AudioFrameBuffer:
             if self._recording:
                 self._frames.append(frame)
 
+    def has_frames(self) -> bool:
+        with self._lock:
+            return bool(self._frames)
+
     def snapshot(self) -> list[T]:
         with self._lock:
             return list(self._frames)
