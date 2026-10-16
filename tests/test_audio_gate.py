@@ -77,6 +77,35 @@ class AudioGateTests(unittest.TestCase):
             )
         )
 
+    def test_keeps_short_quietly_spoken_phrase(self):
+        # Levels of a real "same here" that the old 0.03 peak limit dropped.
+        self.assertFalse(
+            self.module.should_skip_short_low_level_audio(
+                duration_sec=0.69,
+                rms=0.0036,
+                peak=0.0249,
+            )
+        )
+
+    def test_skips_short_room_noise(self):
+        self.assertTrue(
+            self.module.should_skip_short_low_level_audio(
+                duration_sec=0.59,
+                rms=0.0006,
+                peak=0.0079,
+            )
+        )
+
+    def test_skips_quiet_accidental_tap(self):
+        # A 0.14s tap that Whisper transcribed as "Thank you."
+        self.assertTrue(
+            self.module.should_skip_short_low_level_audio(
+                duration_sec=0.14,
+                rms=0.0036,
+                peak=0.0189,
+            )
+        )
+
     def test_keeps_short_audio_with_clear_peak(self):
         self.assertFalse(
             self.module.should_skip_short_low_level_audio(
