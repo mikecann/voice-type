@@ -28,6 +28,7 @@ from tkinter import ttk
 
 from process_relaunch import command_targets_worker
 from recording_archive import RecordingArchive
+from overlay_feedback import checkmark_points
 
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
@@ -1488,6 +1489,7 @@ def _make_control_server(tray, overlay: "Overlay") -> ControlServer:
 _OVL_BG      = "#1C1C1E"   # dark charcoal background
 _COL_REC     = "#FF453A"   # iOS-style red
 _COL_PROC    = "#FF9F0A"   # iOS-style amber
+_COL_DONE    = "#30D158"   # landed text
 _COL_TEXT    = "#EBEBF5"   # near-white
 _COL_PREVIEW = "#8E8E93"   # grey for partial text
 
@@ -1511,10 +1513,13 @@ class Overlay:
         Used to drive the waveform animation while recording.
         """
         self._get_level = get_level
-        self._state     = "hidden"   # "hidden" | "rec" | "processing"
+        self._state     = "hidden"   # hidden | rec | processing | done | paste_failed
         self._bar_h     = [float(_BAR_MIN_H)] * _N_BARS
         self._monitor   = None       # cached work-area tuple for reposition
         self._on_click  = None
+        self._feedback_after = None
+        self._feedback_started = 0.0
+        self._reduce_motion = False
 
         self._root = tk.Tk()
         self._root.withdraw()
@@ -1558,6 +1563,11 @@ class Overlay:
                                                     fill=_COL_REC, outline="")
                 self._bar_ids.append(rid)
 
+            self._check_id = self._canvas.create_line(
+                *checkmark_points(0), fill=_COL_DONE, width=3,
+                capstyle="round", joinstyle="round", state="hidden",
+            )
+
             self._preview = tk.Label(body, text="", fg=_COL_PREVIEW, bg=_OVL_BG,
                                      font=("Segoe UI", 12), anchor="w",
                                      justify="left", wraplength=360,
@@ -1594,6 +1604,13 @@ class Overlay:
 
     def show_processing(self, preview: str = ""):
         self._cmd_queue.put(("processing", preview))
+
+    def show_done(self, words: int):
+        self._cmd_queue.put(("done", f"{words} word{'s' if words != 1 else ''}"))
+
+    def show_paste_failed(self):
+        shortcut = "⌘V" if sys.platform == "darwin" else "Ctrl+V"
+        self._cmd_queue.put(("paste_failed", f"On your clipboard. {shortcut} to paste"))
 
     def hide(self):
         self._cmd_queue.put(("hide", ""))
@@ -1637,6 +1654,51 @@ class Overlay:
 
     # ── Internal (main thread only) ──────────────────────────────────────
 
+    def _cancel_feedback(self):
+        if self._feedback_after is not None:
+            self._root.after_cancel(self._feedback_after)
+            self._feedback_after = None
+
+    def _set_alpha(self, alpha):
+        if self._is_native_surface:
+            self._native_surface.set_alpha(alpha)
+        else:
+            self._root.attributes("-alpha", alpha)
+
+    def _hide_overlay(self):
+        self._cancel_feedback()
+        if self._is_native_surface:
+            self._native_surface.hide()
+        elif self._has_open_or_pending_dialogs():
+            self._move_overlay_offscreen()
+        else:
+            self._root.withdraw()
+        self._visible = False
+        self._state = "hidden"
+        if self._pending_settings_payload is not None:
+            payload = self._pending_settings_payload
+            self._pending_settings_payload = None
+            self._root.after(10, lambda payload=payload: self._open_settings_editor(payload))
+
+    def _start_feedback_fade(self):
+        self._feedback_after = None
+        if self._reduce_motion or self._state == "paste_failed":
+            self._hide_overlay()
+            return
+        self._fade_started = time.monotonic()
+        self._fade_feedback()
+
+    def _fade_feedback(self):
+        self._feedback_after = None
+        alpha = max(0.0, 1.0 - (time.monotonic() - self._fade_started) / 0.14)
+        if alpha <= 0.001:
+            # Hide directly on the UI thread. A queued hide could arrive after
+            # the next recording command and accidentally dismiss its pill.
+            self._hide_overlay()
+            return
+        self._set_alpha(alpha)
+        self._feedback_after = self._root.after(16, self._fade_feedback)
+
     def _poll(self):
         try:
             while True:
@@ -1647,18 +1709,7 @@ class Overlay:
                     self._root.destroy()
                     sys.exit(0)
                 elif cmd == "hide":
-                    if self._is_native_surface:
-                        self._native_surface.hide()
-                    elif self._has_open_or_pending_dialogs():
-                        self._move_overlay_offscreen()
-                    else:
-                        self._root.withdraw()
-                    self._visible = False
-                    self._state   = "hidden"
-                    if self._pending_settings_payload is not None:
-                        payload = self._pending_settings_payload
-                        self._pending_settings_payload = None
-                        self._root.after(10, lambda payload=payload: self._open_settings_editor(payload))
+                    self._hide_overlay()
                 elif cmd == "edit_text":
                     self._open_text_editor(preview)
                 elif cmd == "edit_settings":
@@ -1667,18 +1718,32 @@ class Overlay:
                     else:
                         self._open_settings_editor(preview)
                 else:
+                    self._cancel_feedback()
+                    self._set_alpha(1.0)
                     self._state = cmd
+                    if cmd in ("done", "paste_failed"):
+                        self._reduce_motion = platform.reduce_motion_enabled()
+                        self._feedback_started = time.monotonic()
+                        self._bar_h = [float(_BAR_MIN_H)] * _N_BARS
                     if self._is_native_surface:
                         self._native_surface.set_state(cmd, preview)
+                        if cmd == "done":
+                            self._native_surface.set_completion_progress(1.0 if self._reduce_motion else 0.0)
                     else:
-                        col   = _COL_REC  if cmd == "rec" else _COL_PROC
-                        label = " REC"    if cmd == "rec" else " ..."
+                        col = {"rec": _COL_REC, "done": _COL_DONE}.get(cmd, _COL_PROC)
+                        label = {"rec": " REC", "done": f" {preview}",
+                                 "paste_failed": " Clipboard"}.get(cmd, " ...")
                         self._accent.configure(bg=col)
                         self._dot.configure(fg=col)
                         self._label.configure(text=label)
                         for rid in self._bar_ids:
-                            self._canvas.itemconfigure(rid, fill=col)
-                        if preview:
+                            self._canvas.itemconfigure(
+                                rid, fill=col, state="hidden" if cmd == "done" else "normal",
+                            )
+                        self._canvas.itemconfigure(self._check_id, state="normal" if cmd == "done" else "hidden")
+                        if cmd == "done":
+                            self._canvas.coords(self._check_id, *checkmark_points(1.0 if self._reduce_motion else 0.0))
+                        if preview and cmd != "done":
                             self._preview.configure(text=preview)
                             self._preview.pack(fill="x")
                         else:
@@ -1693,6 +1758,9 @@ class Overlay:
                         self._visible = True
                     else:
                         self._reposition()
+                    if cmd in ("done", "paste_failed"):
+                        hold_ms = 220 if cmd == "done" else 1600
+                        self._feedback_after = self._root.after(hold_ms, self._start_feedback_fade)
         except queue.Empty:
             pass
         self._root.after(50, self._poll)
@@ -1724,7 +1792,13 @@ class Overlay:
         self._root.geometry("1x1+-2000+-2000")
 
     def _animate(self):
-        if self._visible and self._state != "hidden":
+        if self._visible and self._state == "done":
+            progress = 1.0 if self._reduce_motion else min(1.0, (time.monotonic() - self._feedback_started) / 0.12)
+            if self._is_native_surface:
+                self._native_surface.set_completion_progress(progress)
+            else:
+                self._canvas.coords(self._check_id, *checkmark_points(progress))
+        elif self._visible and self._state in ("rec", "processing", "paste_failed"):
             t = time.perf_counter()
             if self._state == "rec":
                 raw   = self._get_level()
@@ -1738,12 +1812,14 @@ class Overlay:
                         level * 0.75 + wave * (0.25 + level * 0.15)
                     )
                     self._bar_h[i] = self._bar_h[i] * 0.5 + target * 0.5
-            else:
+            elif self._state == "processing":
                 # Processing: smooth travelling sine sweep
                 for i in range(_N_BARS):
                     wave   = (math.sin(t * 3.5 + i * 0.75) + 1) / 2
                     target = _BAR_MIN_H + (_BAR_MAX_H - _BAR_MIN_H) * wave * 0.55
                     self._bar_h[i] = self._bar_h[i] * 0.6 + target * 0.4
+            else:
+                self._bar_h = [float(_BAR_MIN_H)] * _N_BARS
 
             y_base = _CANVAS_H - 2
             if self._is_native_surface:
@@ -2672,17 +2748,39 @@ class FinalPrecomputer:
 _injection_lock = threading.Lock()
 
 
-def paste_text(text: str):
+def paste_text(text: str) -> bool:
     if not text.strip():
-        return
+        return False
     # Clipboard save/copy/paste/restore is one transaction. Two overlapping
     # finalizers must never interleave those steps.
     with _injection_lock:
         title = platform.get_foreground_window_title()
         log(f"Injecting into {title!r}: {text!r}")
         time.sleep(0.05)
-        platform.inject_text(text, log)
+        # macOS confirms the target read the clipboard; Windows checks how many
+        # events SendInput actually delivered.
+        landed = platform.inject_text(text, log)
         time.sleep(0.05)
+        return bool(landed)
+
+
+def _paste_with_feedback(text: str, overlay: "Overlay") -> None:
+    """Paste, then show on the pill whether the words landed."""
+    try:
+        pasted = paste_text(text)
+    except Exception:
+        # Don't leave the processing pill up if the paste itself blew up.
+        overlay.hide()
+        raise
+    if pasted:
+        overlay.show_done(len(text.split()))
+    elif sys.platform == "darwin":
+        # A macOS paste that isn't confirmed leaves the text on the clipboard.
+        overlay.show_paste_failed()
+    else:
+        # Windows types with SendInput and never touches the clipboard, so
+        # there's nothing to point at. Just clear the pill.
+        overlay.hide()
 
 
 # ---------------------------------------------------------------------------
@@ -2709,14 +2807,14 @@ def _finish_one_shot(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
         text = ""
 
     elapsed = time.perf_counter() - t0
-    overlay.hide()
     tray.set_state("idle")
     if text:
         text = _maybe_format_final_text(text, mode)
         _remember_transcription(text, mode)
         log(f"Done ({elapsed:.2f}s) [{mode}]: {text!r}")
-        paste_text(text)
+        _paste_with_feedback(text, overlay)
     else:
+        overlay.hide()
         log(f"Nothing to paste ({elapsed:.2f}s) [{mode}].")
 
 
@@ -2757,14 +2855,14 @@ def _finish_precompute(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
         text = ""
 
     elapsed = time.perf_counter() - t0
-    overlay.hide()
     tray.set_state("idle")
     if text:
         text = _maybe_format_final_text(text, "precompute")
         _remember_transcription(text, "precompute")
         log(f"Done ({elapsed:.2f}s) [precompute]: {text!r}")
-        paste_text(text)
+        _paste_with_feedback(text, overlay)
     else:
+        overlay.hide()
         log(f"Nothing to paste ({elapsed:.2f}s) [precompute].")
 
 
@@ -2776,13 +2874,15 @@ def _finish_stabilized(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
 
     injected_parts: list[str] = []
     first_char_t: list[float | None] = [None]
+    all_landed = [True]  # inject_text reports whether each piece landed
 
     def _commit(text: str):
         prefix = " " if injected_parts else ""
         if not injected_parts:
             time.sleep(0.05)   # brief settle before first keystroke
             first_char_t[0] = time.perf_counter()
-        platform.inject_text(prefix + text, log)
+        if platform.inject_text(prefix + text, log) is False:
+            all_landed[0] = False
         injected_parts.append(text)
         overlay.show_processing(_wrap_preview(text))
         log(f"[stabilized] commit: {text!r}")
@@ -2823,18 +2923,26 @@ def _finish_stabilized(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
         if to_delete > 0:
             platform.inject_backspaces(to_delete, log)
             time.sleep(0.02)
-        if tail:
-            platform.inject_text(tail, log)
+        if tail and platform.inject_text(tail, log) is False:
+            all_landed[0] = False
 
     elapsed = time.perf_counter() - t0
-    overlay.hide()
     tray.set_state("idle")
     if first_char_t[0] is not None:
         log(f"[stabilized] first char +{first_char_t[0] - t0:.2f}s, total {elapsed:.2f}s")
     if full_text:
+        # Finish feedback only after every segment and the tail correction
+        # return. On macOS a failed segment already played the failure sound
+        # and only that segment is on the clipboard; on Windows nothing is.
+        # Either way just hide rather than claim more.
+        if all_landed[0]:
+            overlay.show_done(len(full_text.split()))
+        else:
+            overlay.hide()
         _remember_transcription(full_text, "stabilized")
         log(f"Done ({elapsed:.2f}s) [stabilized]: {full_text!r}")
     else:
+        overlay.hide()
         log(f"Nothing to paste ({elapsed:.2f}s) [stabilized].")
 
 
@@ -3084,6 +3192,8 @@ def run():
                     log("--- Key DOWN ---")
                     down_since = time.monotonic()
                     platform.snapshot_target_app()
+                    # Clear completion feedback before waiting for first audio.
+                    overlay.hide()
                     tray.set_state("recording")
                     started = recorder.start()
                     capture_ready_delay = time.monotonic() - down_since

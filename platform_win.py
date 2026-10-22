@@ -59,6 +59,14 @@ def setup_process() -> None:
     pass
 
 
+def reduce_motion_enabled() -> bool:
+    # SPI_GETCLIENTAREAANIMATION reports whether Windows permits UI animation.
+    enabled = ctypes.wintypes.BOOL(True)
+    if not _user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(enabled), 0):
+        return True  # Keep feedback still if the preference cannot be read.
+    return not bool(enabled.value)
+
+
 def _candidate_cuda_dll_dirs() -> list[str]:
     dirs: list[str] = []
 
@@ -125,8 +133,12 @@ def get_foreground_monitor_work_area() -> tuple[int, int, int, int]:
     return r.left, r.top, r.right, r.bottom
 
 
-def inject_text(text: str, log: Callable[[str], None] | None = None) -> None:
-    """Inject text via SendInput (KEYEVENTF_UNICODE) — clipboard is never touched."""
+def inject_text(text: str, log: Callable[[str], None] | None = None) -> bool:
+    """Type text via SendInput (KEYEVENTF_UNICODE). The clipboard is never touched.
+
+    Returns False if SendInput delivered fewer events than it was given, e.g.
+    when UIPI blocks input to an elevated window.
+    """
     inputs = []
     for ch in text:
         code = ord(ch)
@@ -146,11 +158,12 @@ def inject_text(text: str, log: Callable[[str], None] | None = None) -> None:
                 inp.union.ki.dwExtraInfo = 0
                 inputs.append(inp)
     if not inputs:
-        return
+        return True
     arr  = (_INPUT * len(inputs))(*inputs)
-    sent = ctypes.windll.user32.SendInput(len(inputs), arr, ctypes.sizeof(_INPUT))
+    sent = _user32.SendInput(len(inputs), arr, ctypes.sizeof(_INPUT))
     if log:
-        log(f"SendInput: {sent}/{len(inputs) // 2} char events delivered")
+        log(f"SendInput: {sent}/{len(inputs)} key events delivered")
+    return sent >= len(inputs)
 
 
 def inject_backspaces(count: int, log: Callable[[str], None] | None = None) -> None:

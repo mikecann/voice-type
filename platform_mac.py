@@ -27,6 +27,12 @@ _VK_RIGHT_CONTROL = 0x3E
 _DEVICE_RIGHT_CONTROL_MASK = 0x00002000
 
 
+def reduce_motion_enabled() -> bool:
+    from AppKit import NSWorkspace
+
+    return bool(NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion())
+
+
 class MacPushToTalkHotkeys:
     """Track the macOS keys reserved for push-to-talk."""
 
