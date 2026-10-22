@@ -59,6 +59,14 @@ def setup_process() -> None:
     pass
 
 
+def reduce_motion_enabled() -> bool:
+    # SPI_GETCLIENTAREAANIMATION reports whether Windows permits UI animation.
+    enabled = ctypes.wintypes.BOOL(True)
+    if not _user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(enabled), 0):
+        return True  # Keep feedback still if the preference cannot be read.
+    return not bool(enabled.value)
+
+
 def _candidate_cuda_dll_dirs() -> list[str]:
     dirs: list[str] = []
 

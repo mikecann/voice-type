@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import objc
+from overlay_feedback import checkmark_points
 from AppKit import (
     NSApp,
     NSApplication,
@@ -31,6 +32,8 @@ _PADDING_Y = 8
 _ACCENT_WIDTH = 4
 _DOT_SIZE = 12
 _LABEL_WIDTH = 50
+# Done and clipboard labels need more room; the panel itself never changes width.
+_FEEDBACK_LABEL_WIDTH = 124
 _BARS_WIDTH = 46
 _BAR_W = 4
 _BAR_GAP = 3
@@ -49,6 +52,7 @@ class _BarsView(NSView):
         if self is None:
             return None
         self._bar_heights = [3.0] * 7
+        self._check_progress = None
         self._bar_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.27, 0.23, 1.0)
         return self
 
@@ -60,8 +64,21 @@ class _BarsView(NSView):
         self._bar_color = color
         self.setNeedsDisplay_(True)
 
+    def setCheckProgress_(self, progress):
+        self._check_progress = progress
+        self.setNeedsDisplay_(True)
+
     def drawRect_(self, _rect):
         self._bar_color.set()
+        if self._check_progress is not None:
+            points = checkmark_points(self._check_progress)
+            path = NSBezierPath.bezierPath()
+            path.setLineWidth_(3.0)
+            path.moveToPoint_(points[:2])
+            path.lineToPoint_(points[2:4])
+            path.lineToPoint_(points[4:])
+            path.stroke()
+            return
         bounds = self.bounds()
         max_y = bounds.size.height - 2
         for idx, height in enumerate(self._bar_heights):
@@ -149,6 +166,7 @@ class AppKitOverlaySurface:
         self._content.addSubview_(self._preview)
 
         self._is_visible = False
+        self._state = "rec"
         self._set_color(self._record_color())
         self._layout()
 
@@ -157,6 +175,11 @@ class AppKitOverlaySurface:
 
     def _processing_color(self):
         return NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.62, 0.04, 1.0)
+
+    def _state_color(self):
+        if self._state == "done":
+            return NSColor.colorWithCalibratedRed_green_blue_alpha_(48 / 255, 209 / 255, 88 / 255, 1.0)
+        return self._record_color() if self._state == "rec" else self._processing_color()
 
     def _set_color(self, color):
         self._accent.layer().setBackgroundColor_(color.CGColor())
@@ -173,22 +196,32 @@ class AppKitOverlaySurface:
         self._content.setFrame_(NSMakeRect(0, 0, width, height))
         self._accent.setFrame_(NSMakeRect(0, 0, _ACCENT_WIDTH, height))
         self._dot.setFrame_(NSMakeRect(_PADDING_X, 13, 14, 16))
-        self._label.setFrame_(NSMakeRect(_PADDING_X + 18, 11, _LABEL_WIDTH, 18))
+        label_width = _FEEDBACK_LABEL_WIDTH if self._state in ("done", "paste_failed") else _LABEL_WIDTH
+        self._label.setFrame_(NSMakeRect(_PADDING_X + 18, 11, label_width, 18))
         bars_x = width - _PADDING_X - _BARS_WIDTH
         self._bars.setFrame_(NSMakeRect(bars_x, 8, _BARS_WIDTH, 24))
         self._preview.setFrame_(NSMakeRect(_PADDING_X, _TOP_ROW_HEIGHT + _PADDING_Y, width - (_PADDING_X * 2), _PREVIEW_HEIGHT))
 
     def set_state(self, state: str, preview: str):
-        is_recording = state == "rec"
-        color = self._record_color() if is_recording else self._processing_color()
-        self._label.setStringValue_(" REC" if is_recording else " ...")
-        self._preview.setStringValue_(preview or "")
-        self._set_color(color)
+        self._state = state
+        label = {"rec": " REC", "done": preview,
+                 "paste_failed": " Clipboard"}.get(state, " ...")
+        self._label.setStringValue_(label)
+        self._preview.setStringValue_("" if state == "done" else preview or "")
+        self._bars.setCheckProgress_(0.0 if state == "done" else None)
+        if state in ("done", "paste_failed"):
+            self._bars._bar_heights = [3.0] * 7
+        self._set_color(self._state_color())
         self._layout()
 
+    def set_completion_progress(self, progress: float):
+        self._bars.setCheckProgress_(progress)
+
+    def set_alpha(self, alpha: float):
+        self._panel.setAlphaValue_(alpha)
+
     def set_bar_heights(self, bar_heights):
-        color = self._record_color() if self._label.stringValue().strip() == "REC" else self._processing_color()
-        self._bars.setBarHeights_color_(bar_heights, color)
+        self._bars.setBarHeights_color_(bar_heights, self._state_color())
 
     def reposition(self, monitor: tuple[int, int, int, int]):
         left, _top, right, bottom = monitor
