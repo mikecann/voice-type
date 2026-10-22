@@ -48,8 +48,8 @@ class FinalizationFeedbackTests(unittest.TestCase):
         self.overlay = mock.Mock()
         self.tray = mock.Mock()
 
-    def test_paste_propagates_mac_failure_and_accepts_windows_none(self):
-        for result, expected in ((False, False), (True, True), (None, True)):
+    def test_paste_returns_whether_the_text_landed(self):
+        for result, expected in ((False, False), (True, True)):
             with self.subTest(result=result):
                 self.ns["platform"].inject_text.return_value = result
                 self.assertIs(self.ns["paste_text"]("two words"), expected)
@@ -67,7 +67,8 @@ class FinalizationFeedbackTests(unittest.TestCase):
     def test_completion_waits_for_injection_and_handles_failure_in_all_paste_modes(self):
         for mode in ("hybrid", "final_only", "precompute"):
             for pasted in (True, False):
-                with self.subTest(mode=mode, pasted=pasted):
+                with self.subTest(mode=mode, pasted=pasted), \
+                        mock.patch.object(sys, "platform", "darwin"):
                     self.overlay.reset_mock()
                     def inject(text, log):
                         self.overlay.hide.assert_not_called()
@@ -83,6 +84,24 @@ class FinalizationFeedbackTests(unittest.TestCase):
                         self.overlay.show_paste_failed.assert_called_once_with()
                         self.overlay.show_done.assert_not_called()
                     self.overlay.hide.assert_not_called()
+
+    def test_windows_failed_send_hides_instead_of_pointing_at_clipboard(self):
+        # Windows never puts the text on the clipboard, so there's no hint to give.
+        for mode in ("hybrid", "final_only", "precompute"):
+            with self.subTest(mode=mode), mock.patch.object(sys, "platform", "win32"):
+                self.overlay.reset_mock()
+                self.ns["platform"].inject_text.return_value = False
+                self.finish(mode)
+                self.overlay.hide.assert_called_once_with()
+                self.overlay.show_done.assert_not_called()
+                self.overlay.show_paste_failed.assert_not_called()
+
+    def test_windows_successful_send_still_ticks(self):
+        with mock.patch.object(sys, "platform", "win32"):
+            self.ns["platform"].inject_text.return_value = True
+            self.finish("final_only")
+        self.overlay.show_done.assert_called_once_with(2)
+        self.overlay.hide.assert_not_called()
 
     def test_paste_error_hides_processing_pill(self):
         self.ns["platform"].inject_text.side_effect = RuntimeError("pasteboard")
@@ -232,7 +251,7 @@ class OverlayFeedbackTests(unittest.TestCase):
         self.overlay._has_open_or_pending_dialogs = lambda: False
         self.overlay.show_done(42)
         self.overlay._poll()
-        self.overlay._label.configure.assert_called_with(text="42 words")
+        self.overlay._label.configure.assert_called_with(text=" 42 words")
         self.overlay._accent.configure.assert_called_with(bg="#30D158")
         self.overlay._state = "done"
         self.overlay._bar_h = [3.0] * 7
@@ -267,7 +286,7 @@ class NativeSurfaceFeedbackTests(unittest.TestCase):
 
     def test_native_success_uses_green_count_and_draws_check_in_place_of_bars(self):
         self.surface.set_state("done", "42 words")
-        self.surface._label.setStringValue_.assert_called_with("42 words")
+        self.surface._label.setStringValue_.assert_called_with(" 42 words")
         self.surface._preview.setStringValue_.assert_called_with("")
         self.assertEqual([3.0] * 7, self.surface._bars._bar_heights)
         self.ns["NSColor"].colorWithCalibratedRed_green_blue_alpha_.assert_called_with(
@@ -303,6 +322,59 @@ class NativeSurfaceFeedbackTests(unittest.TestCase):
         self.surface._preview.setStringValue_.assert_called_with(hint)
         self.assertIsNone(self.surface._bars._check_progress)
         self.assertEqual([3.0] * 7, self.surface._bars._bar_heights)
+
+
+class WindowsInjectTextTests(unittest.TestCase):
+    """Run the real SendInput wrapper against a fake user32."""
+
+    def setUp(self):
+        tree = ast.parse((ROOT / "platform_win.py").read_text(encoding="utf-8"))
+        # Pull in the INPUT structs, the plain constants and inject_text, but
+        # not the module-level ctypes.windll lookup, which only exists on Windows.
+        selected = ast.Module(body=[node for node in tree.body
+                                   if (isinstance(node, ast.ImportFrom) and node.module == "__future__")
+                                   or (isinstance(node, ast.ClassDef)
+                                       and node.name in ("_KEYBDINPUT", "_INPUT_UNION", "_INPUT"))
+                                   or (isinstance(node, ast.FunctionDef) and node.name == "inject_text")
+                                   or (isinstance(node, ast.Assign)
+                                       and isinstance(node.value, ast.Constant))], type_ignores=[])
+        self.user32 = mock.Mock()
+        self.ns = dict(ctypes=ctypes, _user32=self.user32)
+        exec(compile(selected, "platform_win.py", "exec"), self.ns)
+
+    def deliver(self, count=None):
+        def send_input(n, arr, size):
+            return n if count is None else count
+        self.user32.SendInput.side_effect = send_input
+
+    def test_all_events_delivered_counts_as_landed(self):
+        self.deliver()
+        log = mock.Mock()
+        self.assertIs(True, self.ns["inject_text"]("hi", log))
+        n, arr, size = self.user32.SendInput.call_args[0]
+        self.assertEqual(4, n)  # a key down and key up per character
+        self.assertEqual([ord("h"), ord("h"), ord("i"), ord("i")],
+                         [arr[i].union.ki.wScan for i in range(n)])
+        self.assertEqual(ctypes.sizeof(self.ns["_INPUT"]), size)
+        log.assert_called_once_with("SendInput: 4/4 key events delivered")
+
+    def test_blocked_or_partial_send_does_not_count_as_landed(self):
+        # UIPI blocking input to an elevated window makes SendInput return 0.
+        for delivered in (0, 3):
+            with self.subTest(delivered=delivered):
+                self.deliver(delivered)
+                self.assertIs(False, self.ns["inject_text"]("hi"))
+
+    def test_surrogate_pairs_need_every_event_delivered(self):
+        self.deliver()
+        self.assertIs(True, self.ns["inject_text"]("\U0001F600"))
+        self.assertEqual(4, self.user32.SendInput.call_args[0][0])
+        self.deliver(2)
+        self.assertIs(False, self.ns["inject_text"]("\U0001F600"))
+
+    def test_empty_text_sends_nothing_and_counts_as_landed(self):
+        self.assertIs(True, self.ns["inject_text"](""))
+        self.user32.SendInput.assert_not_called()
 
 
 class CheckmarkTests(unittest.TestCase):

@@ -204,7 +204,7 @@ class AppKitOverlaySurface:
 
     def set_state(self, state: str, preview: str):
         self._state = state
-        label = {"rec": " REC", "done": preview,
+        label = {"rec": " REC", "done": f" {preview}",
                  "paste_failed": " Clipboard"}.get(state, " ...")
         self._label.setStringValue_(label)
         self._preview.setStringValue_("" if state == "done" else preview or "")

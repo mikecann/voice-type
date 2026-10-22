@@ -1731,7 +1731,7 @@ class Overlay:
                             self._native_surface.set_completion_progress(1.0 if self._reduce_motion else 0.0)
                     else:
                         col = {"rec": _COL_REC, "done": _COL_DONE}.get(cmd, _COL_PROC)
-                        label = {"rec": " REC", "done": preview,
+                        label = {"rec": " REC", "done": f" {preview}",
                                  "paste_failed": " Clipboard"}.get(cmd, " ...")
                         self._accent.configure(bg=col)
                         self._dot.configure(fg=col)
@@ -2757,10 +2757,11 @@ def paste_text(text: str) -> bool:
         title = platform.get_foreground_window_title()
         log(f"Injecting into {title!r}: {text!r}")
         time.sleep(0.05)
-        result = platform.inject_text(text, log)
+        # macOS confirms the target read the clipboard; Windows checks how many
+        # events SendInput actually delivered.
+        landed = platform.inject_text(text, log)
         time.sleep(0.05)
-        # Windows SendInput has no confirmation result; macOS returns a bool.
-        return result is not False
+        return bool(landed)
 
 
 def _paste_with_feedback(text: str, overlay: "Overlay") -> None:
@@ -2773,8 +2774,13 @@ def _paste_with_feedback(text: str, overlay: "Overlay") -> None:
         raise
     if pasted:
         overlay.show_done(len(text.split()))
-    else:
+    elif sys.platform == "darwin":
+        # A macOS paste that isn't confirmed leaves the text on the clipboard.
         overlay.show_paste_failed()
+    else:
+        # Windows types with SendInput and never touches the clipboard, so
+        # there's nothing to point at. Just clear the pill.
+        overlay.hide()
 
 
 # ---------------------------------------------------------------------------
@@ -2868,7 +2874,7 @@ def _finish_stabilized(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
 
     injected_parts: list[str] = []
     first_char_t: list[float | None] = [None]
-    all_landed = [True]  # macOS reports each paste; Windows returns None
+    all_landed = [True]  # inject_text reports whether each piece landed
 
     def _commit(text: str):
         prefix = " " if injected_parts else ""
@@ -2926,8 +2932,9 @@ def _finish_stabilized(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
         log(f"[stabilized] first char +{first_char_t[0] - t0:.2f}s, total {elapsed:.2f}s")
     if full_text:
         # Finish feedback only after every segment and the tail correction
-        # return. A failed segment already played the failure sound, and only
-        # that segment is on the clipboard, so just hide rather than claim more.
+        # return. On macOS a failed segment already played the failure sound
+        # and only that segment is on the clipboard; on Windows nothing is.
+        # Either way just hide rather than claim more.
         if all_landed[0]:
             overlay.show_done(len(full_text.split()))
         else:
