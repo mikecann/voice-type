@@ -169,5 +169,32 @@ class CompositeTests(unittest.TestCase):
         self.assertEqual(2000, max(result.size))
 
 
+class DictationMarksTests(unittest.TestCase):
+    class Session:
+        permission_missing = False
+
+        def __init__(self, shots):
+            self.shots = shots
+            self.timeouts = []
+
+        def wait(self, timeout):
+            self.timeouts.append(timeout)
+            return self.shots
+
+    def test_waits_longer_for_more_marks_and_logs_any_left_out(self):
+        strokes = [
+            Stroke(points=[(0, 0)], started_at=0, ended_at=1, number=n)
+            for n in (1, 2, 3)
+        ]
+        session = self.Session([(1, "/a.png"), (3, "/c.png")])
+        logs = []
+        marks = mark_capture.DictationMarks(strokes, session, 0.0, log=logs.append)
+
+        self.assertEqual([(1, "/a.png"), (3, "/c.png")], marks.screenshots())
+        marks.screenshots()
+        self.assertEqual([7.0], session.timeouts)
+        self.assertEqual(["Mark(s) [2] have no screenshot to paste."], logs)
+
+
 if __name__ == "__main__":
     unittest.main()

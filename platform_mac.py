@@ -129,9 +129,43 @@ class MacInkTracker:
             self._current = None
             self._strokes = []
             self._recorded = 0
+            # A press swallowed in the last session whose mouse-up hasn't come
+            # yet is still ours: the app never saw its mouse-down.
+            self._holding_down = self._pending_up_since is not None
             self._pending_up_since = None
-            self._holding_down = False
             self._version += 1
+
+    def resume(self) -> bool:
+        """Pick the session back up, keeping its marks. Returns whether it
+        had stopped.
+
+        For a key let go and pressed again so fast that the worker never saw
+        it up: the tap thread ended drawing, but the recording carries on.
+        """
+        with self._lock:
+            if self._active:
+                return False
+            self._active = True
+            self._holding_down = self._pending_up_since is not None
+            self._pending_up_since = None
+            self._version += 1
+            return True
+
+    def forget_button(self) -> None:
+        """Stop claiming the button after the tap missed events.
+
+        While the tap was off the app may have seen a mouse-up and a fresh
+        mouse-down, so swallowing the next mouse-up could leave it holding a
+        button. The mark in progress ends where it got to.
+        """
+        finished = None
+        with self._lock:
+            if self._current is not None:
+                finished = self._finish_locked()
+            self._holding_down = False
+            self._pending_up_since = None
+            self._version += 1
+        self._announce(finished)
 
     def end(self) -> bool:
         """End the session. Returns whether the tap must stay on for a mouse-up."""
@@ -327,6 +361,22 @@ def begin_drawing_session() -> bool:
     return True
 
 
+def keep_drawing_session() -> None:
+    """Called each worker tick while a recording with drawing is going.
+
+    The tap thread ends drawing the instant the key goes up. If it's pressed
+    again before the worker's next poll, the recording never stopped, so
+    drawing has to come back too, or clicks would reach the app as
+    Control-clicks.
+    """
+    if not _drawing_enabled or _ink.is_active():
+        return
+    with _ink_lock:
+        if not _hotkeys.is_down() or not _ink.resume():
+            return
+    _set_mouse_tap(True)
+
+
 def end_drawing_session() -> list:
     """End the session (if the tap thread hasn't already) and take its marks."""
     _release_drawing()
@@ -500,8 +550,10 @@ def _run_cg_event_tap() -> None:
             Quartz.kCGEventTapDisabledByTimeout,
             Quartz.kCGEventTapDisabledByUserInput,
         ):
-            # Only come back if a session still needs us; otherwise staying
-            # off is exactly what we want.
+            # Button events went straight to the app while we were off, so
+            # we can't know who owns the button any more. Let it go, then
+            # come back only if a session still needs us.
+            _ink.forget_button()
             if _ink.needs_tap():
                 Quartz.CGEventTapEnable(mouse_tap, True)
             return event
@@ -1077,6 +1129,10 @@ def _paste_sequence_via_pasteboard(
     for index, (payload, pasteboard_type) in enumerate(items):
         if index:
             sleep(gap)
+            if pasteboard.changeCount() != offered:
+                # Something else was copied mid-sequence. It's the user's
+                # clipboard now: stop without touching it or restoring over it.
+                return index, False
         read = threading.Event()
         pasteboard.clearContents()
         if not pasteboard.writeObjects_([make_item(payload, pasteboard_type, read.set)]):

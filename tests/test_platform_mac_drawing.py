@@ -117,6 +117,37 @@ class InkTrackerTests(unittest.TestCase):
         self.assertTrue(self.ink.expire_pending_up())
         self.assertFalse(self.ink.needs_tap())
 
+    def test_a_press_owed_from_the_last_session_stays_ours(self):
+        self.ink.begin()
+        self.ink.handle_mouse("down", 0, 0)
+        self.ink.end()
+        # The next dictation starts before that button comes up.
+        self.ink.begin()
+        self.assertEqual((True, True), self.ink.handle_mouse("drag", 5, 0))
+        self.assertEqual((True, True), self.ink.handle_mouse("up", 5, 0))
+        self.assertEqual([], self.ink.take_strokes())
+
+    def test_a_tap_timeout_gives_up_the_button(self):
+        self.ink.begin()
+        self.ink.handle_mouse("down", 0, 0)
+        self.ink.handle_mouse("drag", 40, 0)
+        self.ink.forget_button()
+
+        self.assertEqual(1, len(self.finished))
+        # The app may have seen a fresh mouse-down while the tap was off.
+        self.assertEqual((False, True), self.ink.handle_mouse("up", 50, 0))
+        self.assertTrue(self.ink.is_active())
+
+    def test_resume_keeps_the_marks(self):
+        self.ink.begin()
+        self.drag((0, 0), (100, 0))
+        self.ink.end()
+
+        self.assertTrue(self.ink.resume())
+        self.assertFalse(self.ink.resume())
+        self.drag((0, 50), (100, 50))
+        self.assertEqual([1, 2], [s.number for s in self.ink.take_strokes()])
+
     def test_release_with_no_button_down_lets_the_tap_go(self):
         self.ink.begin()
         self.drag((0, 0), (100, 0))
@@ -188,6 +219,24 @@ class DrawingSessionTests(unittest.TestCase):
         self.module.drawing_watchdog()
         self.assertFalse(self.module._ink.needs_tap())
         self.assertEqual(False, self.tap_states[-1])
+
+    def test_a_quick_release_and_press_brings_drawing_back(self):
+        self.press()
+        self.module.begin_drawing_session()
+        self.module._ink.handle_mouse("down", 10, 10)
+        self.module._ink.handle_mouse("up", 10, 10)
+        # The tap thread sees the key go up and ends drawing at once...
+        self.release()
+        self.module._release_drawing()
+        self.module.keep_drawing_session()
+        self.assertFalse(self.module._ink.is_active())
+        # ...then it's pressed again before the worker's next poll.
+        self.press()
+        self.module.keep_drawing_session()
+
+        self.assertTrue(self.module._ink.is_active())
+        self.assertEqual(True, self.tap_states[-1])
+        self.assertEqual(1, len(self.module.end_drawing_session()))
 
     def test_wake_resets_drawing(self):
         self.press()
@@ -273,6 +322,23 @@ class PasteSequenceTests(unittest.TestCase):
         )
         # A gap before each image and after the last one.
         self.assertEqual(3, self.sleeps.count(0.35))
+
+    def test_a_copy_part_way_through_stops_the_sequence_and_is_kept(self):
+        def target_reads_then_user_copies():
+            self.target_reads()
+            self.pasteboard.setString_forType_("user copy", "public.utf8-plain-text")
+
+        count, ok = self.paste([
+            ("words", "public.utf8-plain-text"),
+            (b"png one", "public.png"),
+        ], post_paste=target_reads_then_user_copies)
+
+        self.assertEqual((1, False), (count, ok))
+        self.assertEqual([("public.utf8-plain-text", "words")], self.pasted)
+        self.assertEqual(
+            [{"public.utf8-plain-text": "user copy"}],
+            [item.values for item in self.pasteboard.items],
+        )
 
     def test_images_only(self):
         count, ok = self.paste([(b"png one", "public.png")])

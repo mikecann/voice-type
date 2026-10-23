@@ -358,12 +358,23 @@ class DictationMarks:
     # Monotonic time of audio sample 0, to turn mark times into audio times.
     audio_origin: float
     wait_timeout: float = 4.0
+    # Marks are captured one at a time, so a dictation with several still
+    # queued at key-up needs longer than one with a single mark.
+    wait_per_mark: float = 1.0
+    log: object = None
     _shots: list | None = None
 
     def screenshots(self) -> list[tuple[int, str]]:
         """(number, path) for every mark that was captured, waiting once."""
         if self._shots is None:
-            self._shots = self.session.wait(self.wait_timeout) if self.session else []
+            timeout = self.wait_timeout + self.wait_per_mark * len(self.strokes)
+            self._shots = self.session.wait(timeout) if self.session else []
+            missing = sorted(
+                {stroke.number for stroke in self.strokes}
+                - {number for number, _path in self._shots}
+            )
+            if missing and self.log is not None:
+                self.log(f"Mark(s) {missing} have no screenshot to paste.")
         return self._shots
 
     @property

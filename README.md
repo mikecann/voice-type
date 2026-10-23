@@ -134,8 +134,8 @@ leaves a ring, a straight drag becomes an arrow, and anything else (a circle,
 a scribble) stays as you drew it. Each mark gets a little number. When you let
 go, the text is pasted with `[1]`, `[2]` and so on where you were talking
 when you drew each mark, and then a screenshot of each mark is pasted after
-it, one by one. That works nicely in T3 Code, Slack and Chrome web apps,
-which turn pasted images into attachments.
+it, one by one. T3 Code, Slack and Chrome web apps turn pasted images into
+attachments, so that's where it's most handy.
 
 A few details:
 
@@ -150,8 +150,10 @@ A few details:
 - Screenshots are saved in a `screenshots` folder under the application-data
   directory and deleted after 7 days. With `audio_recording_enabled` on, the
   dictation's metadata lists them too.
-- It needs Screen Recording permission. Without it your words still paste and
-  the pill says so.
+- It needs Screen Recording permission. The first time you draw without it,
+  your words still paste, the pill says so and macOS asks. Switch on Voice
+  Type under Privacy & Security > Screen & System Audio Recording, then run
+  `voice-type` to restart it.
 - Turn it off with **Draw on screen while holding the key** in Settings.
 
 `debug_mark_capture.py` checks capture and paste without holding the key.

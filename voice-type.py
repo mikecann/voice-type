@@ -3466,7 +3466,7 @@ def run():
                     capture_session = _mark_capturer.finish(strokes)
                     mark_session = None
                     if strokes:
-                        marks = DictationMarks(strokes, capture_session, audio_origin)
+                        marks = DictationMarks(strokes, capture_session, audio_origin, log=log)
                         log(f"{len(strokes)} screen mark(s) drawn.")
                 if recording_session.finish_on_release():
                     log("--- Key UP ---")
@@ -3596,6 +3596,11 @@ def run():
                     recorder.prepare()
                 elif tray.enabled:
                     log("--- Key UP ignored: recording never started ---")
+
+            elif is_down and mark_session is not None:
+                # A release and re-press between two polls looks like one
+                # long press here, but the tap thread still ended drawing.
+                platform.keep_drawing_session()
 
             was_down = is_down
             time.sleep(POLL_INTERVAL)
