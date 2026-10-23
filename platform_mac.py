@@ -79,6 +79,328 @@ class MacPushToTalkHotkeys:
 _hotkeys = MacPushToTalkHotkeys()
 
 
+# ---------------------------------------------------------------------------
+# Draw while dictating — the mouse is a pen while push-to-talk is held.
+#
+# A second event tap watches only left mouse down, drag and up, and is only
+# enabled while a drawing session is live, so normal mouse use never goes
+# through Python. Plain movement isn't in its mask at all, so the cursor
+# moves as usual even while drawing.
+#
+# The tap callback only records points under a lock and hands finished
+# strokes to a queue. Drawing happens on the main thread, capture on its own
+# worker, both well away from the tap's watchdog.
+# ---------------------------------------------------------------------------
+
+# A mouse-up still owed to us after the key went up mid-drag is given up on
+# after this long, so the mouse can never stay swallowed.
+_PENDING_MOUSE_UP_TIMEOUT = 5.0
+# Skip drag samples closer than this to the previous one (points).
+_MIN_SAMPLE_SPACING = 1.0
+
+
+class MacInkTracker:
+    """Turn mouse events into strokes while a drawing session is live.
+
+    `handle_mouse` returns (swallow, keep_tap). The caller swallows the event
+    when told to, and disables the mouse tap once keep_tap is False.
+    """
+
+    def __init__(self, *, clock=None, max_marks: int = 10, on_stroke=None) -> None:
+        import time
+        self._clock = clock or time.monotonic
+        self._max_marks = max_marks
+        self.on_stroke = on_stroke
+        self._lock = threading.Lock()
+        self._active = False
+        self._current: list[tuple[float, float]] | None = None
+        self._current_started = 0.0
+        self._strokes: list = []
+        self._recorded = 0
+        self._pending_up_since: float | None = None
+        # Whether the button is down on a press we swallowed. A drag that was
+        # already under way at key-down belongs to the app, not to us.
+        self._holding_down = False
+        self._version = 0
+
+    def begin(self) -> None:
+        with self._lock:
+            self._active = True
+            self._current = None
+            self._strokes = []
+            self._recorded = 0
+            # A press swallowed in the last session whose mouse-up hasn't come
+            # yet is still ours: the app never saw its mouse-down.
+            self._holding_down = self._pending_up_since is not None
+            self._pending_up_since = None
+            self._version += 1
+
+    def resume(self) -> bool:
+        """Pick the session back up, keeping its marks. Returns whether it
+        had stopped.
+
+        For a key let go and pressed again so fast that the worker never saw
+        it up: the tap thread ended drawing, but the recording carries on.
+        """
+        with self._lock:
+            if self._active:
+                return False
+            self._active = True
+            self._holding_down = self._pending_up_since is not None
+            self._pending_up_since = None
+            self._version += 1
+            return True
+
+    def forget_button(self) -> None:
+        """Stop claiming the button after the tap missed events.
+
+        While the tap was off the app may have seen a mouse-up and a fresh
+        mouse-down, so swallowing the next mouse-up could leave it holding a
+        button. The mark in progress ends where it got to.
+        """
+        finished = None
+        with self._lock:
+            if self._current is not None:
+                finished = self._finish_locked()
+            self._holding_down = False
+            self._pending_up_since = None
+            self._version += 1
+        self._announce(finished)
+
+    def end(self) -> bool:
+        """End the session. Returns whether the tap must stay on for a mouse-up."""
+        finished = None
+        with self._lock:
+            if not self._active:
+                return self._pending_up_since is not None
+            self._active = False
+            if self._holding_down:
+                # Key released mid-drag: the mark ends here, but the app
+                # never saw the mouse-down, so its mouse-up is ours too.
+                if self._current is not None:
+                    finished = self._finish_locked()
+                self._holding_down = False
+                self._pending_up_since = self._clock()
+            self._version += 1
+            keep = self._pending_up_since is not None
+        self._announce(finished)
+        return keep
+
+    def reset(self) -> None:
+        """Forget everything and stop swallowing, e.g. after a tap timeout."""
+        with self._lock:
+            self._active = False
+            self._current = None
+            self._strokes = []
+            self._pending_up_since = None
+            self._holding_down = False
+            self._version += 1
+
+    def is_active(self) -> bool:
+        with self._lock:
+            return self._active
+
+    def needs_tap(self) -> bool:
+        with self._lock:
+            return self._active or self._pending_up_since is not None
+
+    def expire_pending_up(self) -> bool:
+        """Drop an owed mouse-up that never came. Returns whether the tap can go."""
+        with self._lock:
+            if self._active:
+                return False
+            if (
+                self._pending_up_since is not None
+                and self._clock() - self._pending_up_since > _PENDING_MOUSE_UP_TIMEOUT
+            ):
+                self._pending_up_since = None
+            return self._pending_up_since is None
+
+    def handle_mouse(self, kind: str, x: float, y: float) -> tuple[bool, bool]:
+        finished = None
+        with self._lock:
+            if not self._active:
+                if self._pending_up_since is None:
+                    return False, False
+                if kind == "down":
+                    # A fresh click after the session: the owed mouse-up is
+                    # lost somewhere, so let this click through as normal.
+                    self._pending_up_since = None
+                    return False, False
+                if kind == "up":
+                    self._pending_up_since = None
+                    return True, False
+                return True, True
+
+            if kind != "down" and not self._holding_down:
+                # The app saw this drag's mouse-down before the key went
+                # down, so let the rest of it through.
+                return False, True
+            if kind == "down":
+                self._holding_down = True
+                if self._current is not None:
+                    finished = self._finish_locked()
+                if self._recorded < self._max_marks:
+                    self._current = [(x, y)]
+                    self._current_started = self._clock()
+            elif kind == "drag":
+                if self._current is not None:
+                    last = self._current[-1]
+                    if abs(x - last[0]) + abs(y - last[1]) >= _MIN_SAMPLE_SPACING:
+                        self._current.append((x, y))
+            elif kind == "up":
+                self._holding_down = False
+                if self._current is not None:
+                    self._current.append((x, y))
+                    finished = self._finish_locked()
+            self._version += 1
+        self._announce(finished)
+        return True, True
+
+    def _finish_locked(self):
+        from screen_marks import Stroke
+        self._recorded += 1
+        stroke = Stroke(
+            points=self._current,
+            started_at=self._current_started,
+            ended_at=self._clock(),
+            number=self._recorded,
+        )
+        self._strokes.append(stroke)
+        self._current = None
+        return stroke
+
+    def _announce(self, stroke) -> None:
+        # Outside the lock: the callback only puts the stroke on a queue.
+        if stroke is not None and self.on_stroke is not None:
+            try:
+                self.on_stroke(stroke)
+            except Exception:
+                pass
+
+    def take_strokes(self) -> list:
+        with self._lock:
+            strokes, self._strokes = self._strokes, []
+            self._version += 1
+            return strokes
+
+    def snapshot(self) -> tuple[int, list, list | None]:
+        """(version, finished strokes, in-progress points) for drawing."""
+        with self._lock:
+            current = list(self._current) if self._current is not None else None
+            return self._version, list(self._strokes), current
+
+
+_ink = MacInkTracker()
+_ink_lock = threading.Lock()
+_mouse_tap = None
+_drawing_enabled = False
+
+
+_mouse_tap_on = False
+
+
+def _set_mouse_tap(enabled: bool) -> None:
+    global _mouse_tap_on
+    tap = _mouse_tap
+    if tap is None:
+        return
+    # The watchdog asks for "off" every loop tick; only talk to the window
+    # server when the state actually changes.
+    if enabled == _mouse_tap_on and not enabled:
+        return
+    try:
+        import Quartz
+        Quartz.CGEventTapEnable(tap, enabled)
+        _mouse_tap_on = enabled
+    except Exception:
+        pass
+
+
+def _release_drawing() -> None:
+    """End the drawing session as the key goes up. Safe on the tap thread."""
+    with _ink_lock:
+        keep = _ink.end()
+    if not keep:
+        _set_mouse_tap(False)
+
+
+def _reset_drawing() -> None:
+    """Stop drawing and let every mouse event through again."""
+    with _ink_lock:
+        _ink.reset()
+    _set_mouse_tap(False)
+
+
+def set_drawing_enabled(enabled: bool, on_stroke=None) -> None:
+    """Turn draw-while-dictating on or off. `on_stroke` gets each finished mark."""
+    global _drawing_enabled
+    _drawing_enabled = bool(enabled)
+    _ink.on_stroke = on_stroke
+    if not enabled:
+        _reset_drawing()
+
+
+def drawing_available() -> bool:
+    return _drawing_enabled and _mouse_tap is not None
+
+
+def begin_drawing_session() -> bool:
+    """Start a drawing session for a recording that has just started.
+
+    Called by the main worker after key-down, never on the tap thread. If
+    the key has already gone up again, nothing starts.
+    """
+    if not drawing_available():
+        return False
+    with _ink_lock:
+        if not _hotkeys.is_down():
+            return False
+        _ink.begin()
+    _set_mouse_tap(True)
+    return True
+
+
+def keep_drawing_session() -> None:
+    """Called each worker tick while a recording with drawing is going.
+
+    The tap thread ends drawing the instant the key goes up. If it's pressed
+    again before the worker's next poll, the recording never stopped, so
+    drawing has to come back too, or clicks would reach the app as
+    Control-clicks.
+    """
+    if not _drawing_enabled or _ink.is_active():
+        return
+    with _ink_lock:
+        if not _hotkeys.is_down() or not _ink.resume():
+            return
+    _set_mouse_tap(True)
+
+
+def end_drawing_session() -> list:
+    """End the session (if the tap thread hasn't already) and take its marks."""
+    _release_drawing()
+    return _ink.take_strokes()
+
+
+def drawing_snapshot() -> tuple[int, list, list | None]:
+    return _ink.snapshot()
+
+
+def drawing_watchdog() -> None:
+    """Belt and braces for the main loop: the mouse must never stay captured.
+
+    The tap thread normally ends the session on key-up. If the key state was
+    reset some other way, or an owed mouse-up never arrived, this lets the
+    mouse go.
+    """
+    if _ink.is_active() and not _hotkeys.is_down():
+        _release_drawing()
+    elif not _ink.is_active() and _ink.expire_pending_up() and _mouse_tap is not None:
+        if not _ink.needs_tap():
+            _set_mouse_tap(False)
+
+
 def _set_hotkey_listener_status(state: str) -> None:
     global _hotkey_listener_state
     with _hotkey_listener_state_lock:
@@ -95,6 +417,7 @@ def _note_system_wake(_notification) -> None:
     with _lifecycle_lock:
         _wake_generation += 1
     _hotkeys.reset()
+    _reset_drawing()
 
 
 def _note_display_change(_notification) -> None:
@@ -191,6 +514,7 @@ def setup_dll_paths() -> None:
 
 def _run_cg_event_tap() -> None:
     """Block the calling thread running the push-to-talk CGEventTap."""
+    global _mouse_tap, _mouse_tap_on
     import Quartz
 
     def _callback(proxy, event_type, event, refcon):
@@ -204,14 +528,43 @@ def _run_cg_event_tap() -> None:
         ):
             Quartz.CGEventTapEnable(tap, True)
             _hotkeys.reset()
+            # The key-up may be among the lost events, so the mouse must not
+            # stay a pen.
+            _reset_drawing()
             return event
 
         # Keep this callback minimal — any slow work here (e.g. AppKit calls)
         # risks tripping the tap watchdog. The frontmost-app snapshot is taken
         # by the main worker via snapshot_target_app() instead.
         if handle_quartz_hotkey_event(Quartz, event_type, event):
+            # Stop drawing the moment the key goes up, right here rather than
+            # on the worker's next poll, so a click straight after release
+            # always reaches the app.
+            if not _hotkeys.is_down() and _ink.needs_tap():
+                _release_drawing()
             return None
         return event
+
+    def _mouse_callback(proxy, event_type, event, refcon):
+        if event_type in (
+            Quartz.kCGEventTapDisabledByTimeout,
+            Quartz.kCGEventTapDisabledByUserInput,
+        ):
+            # Button events went straight to the app while we were off, so
+            # we can't know who owns the button any more. Let it go, then
+            # come back only if a session still needs us.
+            _ink.forget_button()
+            if _ink.needs_tap():
+                Quartz.CGEventTapEnable(mouse_tap, True)
+            return event
+        kind = mouse_kinds.get(event_type)
+        if kind is None:
+            return event
+        location = Quartz.CGEventGetLocation(event)
+        swallow, keep = _ink.handle_mouse(kind, location.x, location.y)
+        if not keep:
+            _set_mouse_tap(False)
+        return None if swallow else event
 
     mask = (
         (1 << Quartz.kCGEventKeyDown)
@@ -236,6 +589,39 @@ def _run_cg_event_tap() -> None:
     loop   = Quartz.CFRunLoopGetCurrent()
     Quartz.CFRunLoopAddSource(loop, source, Quartz.kCFRunLoopDefaultMode)
     Quartz.CGEventTapEnable(tap, True)
+
+    # The drawing tap shares this thread's run loop but starts disabled. It's
+    # only switched on while a drawing session needs it. Any failure here
+    # just turns drawing off; it must never cost us the hotkey tap.
+    mouse_kinds = {
+        Quartz.kCGEventLeftMouseDown: "down",
+        Quartz.kCGEventLeftMouseDragged: "drag",
+        Quartz.kCGEventLeftMouseUp: "up",
+    }
+    mouse_tap = None
+    try:
+        mouse_mask = 0
+        for event_type in mouse_kinds:
+            mouse_mask |= 1 << event_type
+        mouse_tap = Quartz.CGEventTapCreate(
+            Quartz.kCGSessionEventTap,
+            Quartz.kCGHeadInsertEventTap,
+            Quartz.kCGEventTapOptionDefault,
+            mouse_mask,
+            _mouse_callback,
+            None,
+        )
+        if mouse_tap is not None:
+            Quartz.CGEventTapEnable(mouse_tap, False)
+            mouse_source = Quartz.CFMachPortCreateRunLoopSource(None, mouse_tap, 0)
+            Quartz.CFRunLoopAddSource(loop, mouse_source, Quartz.kCFRunLoopDefaultMode)
+            _mouse_tap_on = False
+            _mouse_tap = mouse_tap
+    except Exception as exc:
+        print(f"[voice-type] Mouse event tap failed ({exc}).", flush=True)
+        mouse_tap = None
+    if mouse_tap is None:
+        print("[voice-type] Mouse event tap unavailable; drawing while dictating is off.", flush=True)
     _set_hotkey_listener_status("event-tap")
     Quartz.CFRunLoopRun()   # blocks until CFRunLoopStop is called
 
@@ -635,6 +1021,205 @@ def inject_text(text: str, log: Callable[[str], None] | None = None) -> bool:
             f"focus {focused_role or 'unknown'}"
             f"{', refocused target' if refocused else ''})")
     return True
+
+
+# ---------------------------------------------------------------------------
+# Text plus screenshots
+#
+# Marks from drawing while dictating are pasted as separate Cmd+V presses:
+# the text first, then each PNG in order. Electron/Chromium composers (T3
+# Code, Slack, Chrome web apps) turn a pasted image into an attachment, but
+# only one image per paste and only if the clipboard still holds it when
+# their paste handler runs, so each item waits to be read and then gets a
+# short gap before the next one replaces it. The old clipboard is restored
+# once, after the last item, so clipboard managers see one round trip.
+#
+# Dictations without marks never come through here; they keep inject_text.
+# ---------------------------------------------------------------------------
+
+_PNG_TYPE = "public.png"
+_IMAGE_PASTE_GAP = 0.35
+_data_provider_class = None
+_live_data_providers: list = []
+
+
+def _lazy_data_item(payload, pasteboard_type: str, on_read: Callable[[], None]):
+    """Like _lazy_text_item, for text or PNG bytes."""
+    global _data_provider_class
+    import objc
+    from AppKit import NSPasteboardItem
+    from Foundation import NSData, NSObject
+
+    if _data_provider_class is None:
+        class VoiceTypeDataProvider(
+            NSObject,
+            protocols=[objc.protocolNamed("NSPasteboardItemDataProvider")],
+        ):
+            def pasteboard_item_provideDataForType_(self, _pasteboard, item, requested_type):
+                if isinstance(self.payload, str):
+                    item.setString_forType_(self.payload, requested_type)
+                else:
+                    item.setData_forType_(
+                        NSData.dataWithBytes_length_(self.payload, len(self.payload)),
+                        requested_type,
+                    )
+                self.on_read()
+
+            def pasteboardFinishedWithDataProvider_(self, _pasteboard):
+                pass
+
+        _data_provider_class = VoiceTypeDataProvider
+
+    provider = _data_provider_class.alloc().init()
+    provider.payload = payload
+    provider.on_read = on_read
+    # The pasteboard holds providers weakly; keep this sequence's alive.
+    _live_data_providers[:] = [provider]
+
+    item = NSPasteboardItem.alloc().init()
+    item.setDataProvider_forTypes_(provider, [pasteboard_type])
+    return item
+
+
+def _leave_item_on_clipboard(pasteboard, payload, pasteboard_type: str, offered: int) -> None:
+    if pasteboard.changeCount() != offered:
+        return
+    pasteboard.clearContents()
+    if isinstance(payload, str):
+        pasteboard.setString_forType_(payload, pasteboard_type)
+    else:
+        from Foundation import NSData
+        pasteboard.setData_forType_(
+            NSData.dataWithBytes_length_(payload, len(payload)), pasteboard_type,
+        )
+
+
+def _paste_sequence_via_pasteboard(
+    pasteboard,
+    items: list[tuple[object, str]],
+    post_paste: Callable[[], None],
+    *,
+    landed: Callable[[], bool] | None = None,
+    make_item=None,
+    item_class=None,
+    leave_on_clipboard=None,
+    timeout: float = _PASTE_READ_TIMEOUT,
+    gap: float = _IMAGE_PASTE_GAP,
+    sleep=None,
+) -> tuple[int, bool]:
+    """Paste each (payload, type) in order, then restore the clipboard once.
+
+    `landed` is asked after the first item is read, like _paste_via_pasteboard.
+    Returns how many items the target read and whether everything landed.
+    If something didn't, that item is left on the clipboard and the rest are
+    skipped; the screenshots are still on disk.
+    """
+    import time
+    if make_item is None:
+        make_item = _lazy_data_item
+    if leave_on_clipboard is None:
+        leave_on_clipboard = _leave_item_on_clipboard
+    if sleep is None:
+        sleep = time.sleep
+    if not items:
+        return 0, True
+
+    snapshot = _snapshot_pasteboard(pasteboard)
+    offered = pasteboard.changeCount()
+    for index, (payload, pasteboard_type) in enumerate(items):
+        if index:
+            sleep(gap)
+            if pasteboard.changeCount() != offered:
+                # Something else was copied mid-sequence. It's the user's
+                # clipboard now: stop without touching it or restoring over it.
+                return index, False
+        read = threading.Event()
+        pasteboard.clearContents()
+        if not pasteboard.writeObjects_([make_item(payload, pasteboard_type, read.set)]):
+            raise RuntimeError("Could not put the paste on the pasteboard")
+        offered = pasteboard.changeCount()
+        post_paste()
+        if not read.wait(timeout):
+            leave_on_clipboard(pasteboard, payload, pasteboard_type, offered)
+            return index, False
+        # The provider hands the data over when its callback returns.
+        sleep(0.05)
+        if index == 0 and landed is not None and not landed():
+            leave_on_clipboard(pasteboard, payload, pasteboard_type, offered)
+            return 1, False
+    if items and items[-1][1] != _TEXT_TYPE:
+        # Chromium reads the image, then builds the attachment on a later
+        # task. Restoring straight away is fine for text, but give the last
+        # image the same breathing room as the ones before it.
+        sleep(gap)
+    if pasteboard.changeCount() == offered:
+        _restore_pasteboard(pasteboard, snapshot, item_class)
+    return len(items), True
+
+
+def inject_text_and_images(
+    text: str,
+    images: list[bytes],
+    log: Callable[[str], None] | None = None,
+) -> bool:
+    """Paste dictated text (if any) followed by each PNG, in order."""
+    import time
+    from AppKit import NSPasteboard
+
+    refocused = restore_target_app_focus()
+    if refocused:
+        time.sleep(_REFOCUS_SETTLE)
+    focused_role = None
+
+    def landed() -> bool:
+        nonlocal focused_role
+        has_text_box, focused_role = _wait_for_text_box(_frontmost_pid())
+        return has_text_box
+
+    items: list[tuple[object, str]] = []
+    if text.strip():
+        items.append((text, _TEXT_TYPE))
+    items.extend((png, _PNG_TYPE) for png in images)
+    pasted, ok = _paste_sequence_via_pasteboard(
+        NSPasteboard.generalPasteboard(),
+        items,
+        _post_cmd_v,
+        landed=landed if text.strip() else None,
+    )
+    if not ok:
+        subprocess.Popen(["afplay", _PASTE_FAILED_SOUND])
+        if log:
+            log(
+                f"Paste with screenshots stopped after {pasted} of {len(items)} "
+                f"item(s) (focus {focused_role or 'unknown'}). The next item is "
+                "left on the clipboard."
+            )
+        return False
+    if log:
+        log(
+            f"NSPasteboard+Cmd+V: {len(text)} chars and {len(images)} "
+            f"screenshot(s) injected (focus {focused_role or 'unknown'}"
+            f"{', refocused target' if refocused else ''})"
+        )
+    return True
+
+
+def screen_capture_allowed() -> bool:
+    """Whether Voice Type may capture other apps' windows (Screen Recording)."""
+    try:
+        import Quartz
+        return bool(Quartz.CGPreflightScreenCaptureAccess())
+    except Exception:
+        return False
+
+
+def request_screen_capture() -> None:
+    """Ask macOS for Screen Recording. Shows the system prompt the first time."""
+    try:
+        import Quartz
+        Quartz.CGRequestScreenCaptureAccess()
+    except Exception:
+        pass
 
 
 def inject_backspaces(count: int, log: Callable[[str], None] | None = None) -> None:

@@ -346,6 +346,42 @@ class VocabularyPromptTests(unittest.TestCase):
         self.assertEqual(["Convex.", "Convex."], [call["initial_prompt"] for call in calls])
         self.assertEqual(["First part.", "Second part."], [segment.text for segment in segments])
 
+    def test_mlx_only_asks_for_word_timings_when_wanted(self):
+        calls = []
+        with mock.patch.dict(sys.modules, self._fake_mlx(calls)):
+            model = self.module.MlxWhisperModel(repo_id="test/repo")
+            model.transcribe(_speech(3.0), language="en")
+            model.transcribe(_speech(3.0), language="en", word_timestamps=True)
+
+        self.assertNotIn("word_timestamps", calls[0])
+        self.assertTrue(calls[1]["word_timestamps"])
+
+    def test_mlx_word_timings_are_offset_for_each_window_of_long_audio(self):
+        results = iter([
+            {"segments": [{"text": " First", "start": 0.5, "end": 1.0,
+                           "words": [{"word": " First", "start": 0.5, "end": 1.0}]}]},
+            {"segments": [{"text": " Second", "start": 0.2, "end": 0.9,
+                           "words": [{"word": " Second", "start": 0.2, "end": 0.9}]}]},
+        ])
+        fake = {
+            "mlx_whisper": SimpleNamespace(transcribe=lambda audio, **kwargs: next(results)),
+            "mlx": SimpleNamespace(core=SimpleNamespace(clear_cache=lambda: None)),
+        }
+        with mock.patch.dict(sys.modules, fake):
+            model = self.module.MlxWhisperModel(repo_id="test/repo")
+            segments, _info = model.transcribe(
+                _speech(45.0, quiet_from=24.0, quiet_to=24.5),
+                language="en",
+                initial_prompt="Convex.",
+                word_timestamps=True,
+            )
+
+        self.assertEqual(0.5, segments[0].words[0].start)
+        second = segments[1].words[0]
+        self.assertGreater(second.start, 24.0)
+        self.assertLess(second.start, 25.0)
+        self.assertAlmostEqual(segments[1].start, second.start)
+
 
 if __name__ == "__main__":
     unittest.main()

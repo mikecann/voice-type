@@ -45,6 +45,16 @@ else:
 
 if sys.platform == "darwin":
     from appkit_overlay import AppKitOverlaySurface
+    # Draw while dictating is macOS only; Windows never imports any of it.
+    from mark_capture import DictationMarks, MarkCapturer
+    from screen_marks import (
+        ScreenshotStore,
+        append_markers,
+        insert_markers,
+        marker_text,
+        spoken_word_counts,
+        timings_from_segments,
+    )
 
 platform.setup_dll_paths()
 
@@ -387,6 +397,11 @@ _HISTORY_PATH = os.path.join(_HISTORY_DIR, "transcription-history.jsonl")
 _transcription_history = TranscriptionHistory(_HISTORY_PATH)
 _recording_archive = RecordingArchive(os.path.join(_HISTORY_DIR, "recordings"))
 _recording_context = threading.local()
+_screenshot_store = (
+    ScreenshotStore(os.path.join(_HISTORY_DIR, "screenshots"))
+    if sys.platform == "darwin" else None
+)
+_mark_capturer = None
 
 
 def _update_recording(**fields) -> None:
@@ -423,6 +438,13 @@ def _cleanup_recordings() -> None:
             log(f"Deleted {removed} expired recording archive file(s).")
     except Exception as error:
         log(f"Recording retention cleanup failed: {error}")
+    if _screenshot_store is not None:
+        try:
+            removed = _screenshot_store.cleanup()
+            if removed:
+                log(f"Deleted {removed} expired mark screenshot(s).")
+        except Exception as error:
+            log(f"Screenshot retention cleanup failed: {error}")
 
 
 def _recording_retention_worker() -> None:
@@ -496,6 +518,8 @@ def _load_settings():
     _settings.setdefault("microphone_name", DEFAULT_MICROPHONE_NAME)
     _settings.setdefault("formatter_enabled", False)
     _settings.setdefault("audio_recording_enabled", False)
+    # Drawing while dictating only exists on macOS.
+    _settings.setdefault("draw_on_screen_enabled", sys.platform == "darwin")
     _settings.setdefault("formatter_model", DEFAULT_FORMATTER_MODEL)
     _settings.setdefault("formatter_system_prompt", DEFAULT_FORMATTER_SYSTEM_PROMPT)
     if _settings.get("formatter_model") not in FORMATTER_MODEL_PRESETS:
@@ -902,6 +926,26 @@ def _set_formatter_enabled(enabled: bool):
         threading.Thread(target=get_text_formatter, daemon=True).start()
 
 
+def _apply_draw_on_screen_setting() -> None:
+    if sys.platform != "darwin":
+        return
+    enabled = bool(_settings.get("draw_on_screen_enabled", False))
+    platform.set_drawing_enabled(
+        enabled,
+        on_stroke=_mark_capturer.submit if _mark_capturer is not None else None,
+    )
+
+
+def _set_draw_on_screen_enabled(enabled: bool):
+    enabled = bool(enabled)
+    if bool(_settings.get("draw_on_screen_enabled", False)) == enabled:
+        return
+    log(f"Draw while dictating {'enabled' if enabled else 'disabled'}.")
+    _settings["draw_on_screen_enabled"] = enabled
+    _save_settings()
+    _apply_draw_on_screen_setting()
+
+
 def _set_formatter_model(name: str):
     global _text_formatter
     if name not in FORMATTER_MODEL_PRESETS:
@@ -1300,6 +1344,8 @@ def _build_control_state(tray) -> dict:
         "audio_recording_enabled": bool(_settings.get("audio_recording_enabled", False)),
         "audio_recording_retention_days": _recording_archive.retention_days,
         "audio_recording_directory": str(_recording_archive.path),
+        "draw_on_screen_supported": sys.platform == "darwin",
+        "draw_on_screen_enabled": bool(_settings.get("draw_on_screen_enabled", False)),
         "formatter_model": _settings.get("formatter_model"),
         "startup_enabled": platform.startup_enabled(_VBS_PATH),
         "log_path": _LOG_PATH,
@@ -1352,6 +1398,8 @@ def _apply_settings_changes(*, tray, updates: dict) -> None:
     _set_microphone_name(str(updates.get("microphone_name", _settings.get("microphone_name", ""))))
     _set_formatter_enabled(bool(updates.get("formatter_enabled", _settings.get("formatter_enabled", False))))
     _set_formatter_model(str(updates.get("formatter_model", _settings.get("formatter_model"))))
+    if "draw_on_screen_enabled" in updates:
+        _set_draw_on_screen_enabled(bool(updates["draw_on_screen_enabled"]))
 
 
 def _restart_app(reason: str = "requested from settings window") -> bool:
@@ -1594,8 +1642,13 @@ class Overlay:
         self._dialog_requested = False
         self._pending_settings_payload = None
         self._cmd_queue: queue.Queue = queue.Queue()
+        self._ink_surface = None
+        self._ink_version = -1
+        self._ink_failed = False
         self._root.after(50,  self._poll)
         self._root.after(33,  self._animate)   # 30 fps animation loop
+        if self._is_native_surface:
+            self._root.after(50, self._poll_ink)
 
     # ── Thread-safe public commands ──────────────────────────────────────
 
@@ -1605,12 +1658,22 @@ class Overlay:
     def show_processing(self, preview: str = ""):
         self._cmd_queue.put(("processing", preview))
 
-    def show_done(self, words: int):
-        self._cmd_queue.put(("done", f"{words} word{'s' if words != 1 else ''}"))
+    def show_done(self, words: int, shots: int = 0):
+        label = f"{words} word{'s' if words != 1 else ''}"
+        if shots:
+            shot_label = f"{shots} shot{'s' if shots != 1 else ''}"
+            label = f"{label} + {shot_label}" if words else shot_label
+        self._cmd_queue.put(("done", label))
 
     def show_paste_failed(self):
         shortcut = "⌘V" if sys.platform == "darwin" else "Ctrl+V"
         self._cmd_queue.put(("paste_failed", f"On your clipboard. {shortcut} to paste"))
+
+    def show_screen_recording_hint(self):
+        self._cmd_queue.put((
+            "hint",
+            "Allow Voice Type under Screen Recording in System Settings",
+        ))
 
     def hide(self):
         self._cmd_queue.put(("hide", ""))
@@ -1682,7 +1745,7 @@ class Overlay:
 
     def _start_feedback_fade(self):
         self._feedback_after = None
-        if self._reduce_motion or self._state == "paste_failed":
+        if self._reduce_motion or self._state in ("paste_failed", "hint"):
             self._hide_overlay()
             return
         self._fade_started = time.monotonic()
@@ -1721,7 +1784,7 @@ class Overlay:
                     self._cancel_feedback()
                     self._set_alpha(1.0)
                     self._state = cmd
-                    if cmd in ("done", "paste_failed"):
+                    if cmd in ("done", "paste_failed", "hint"):
                         self._reduce_motion = platform.reduce_motion_enabled()
                         self._feedback_started = time.monotonic()
                         self._bar_h = [float(_BAR_MIN_H)] * _N_BARS
@@ -1732,7 +1795,8 @@ class Overlay:
                     else:
                         col = {"rec": _COL_REC, "done": _COL_DONE}.get(cmd, _COL_PROC)
                         label = {"rec": " REC", "done": f" {preview}",
-                                 "paste_failed": " Clipboard"}.get(cmd, " ...")
+                                 "paste_failed": " Clipboard",
+                                 "hint": " No screenshots"}.get(cmd, " ...")
                         self._accent.configure(bg=col)
                         self._dot.configure(fg=col)
                         self._label.configure(text=label)
@@ -1758,12 +1822,38 @@ class Overlay:
                         self._visible = True
                     else:
                         self._reposition()
-                    if cmd in ("done", "paste_failed"):
+                    if cmd in ("done", "paste_failed", "hint"):
                         hold_ms = 220 if cmd == "done" else 1600
                         self._feedback_after = self._root.after(hold_ms, self._start_feedback_fade)
         except queue.Empty:
             pass
         self._root.after(50, self._poll)
+
+    def _poll_ink(self):
+        """Mirror the drawing session onto the ink overlay (main thread).
+
+        The event tap only records points; this picks them up. It runs at
+        60 fps while there's ink and drops to a cheap idle check otherwise.
+        """
+        delay = 50
+        try:
+            version, strokes, current = platform.drawing_snapshot()
+            if version != self._ink_version:
+                self._ink_version = version
+                if strokes or current:
+                    if self._ink_surface is None:
+                        from appkit_ink import AppKitInkOverlay
+                        self._ink_surface = AppKitInkOverlay()
+                    self._ink_surface.show(strokes, current)
+                elif self._ink_surface is not None:
+                    self._ink_surface.clear()
+            if strokes or current:
+                delay = 16
+        except Exception as error:
+            if not self._ink_failed:
+                self._ink_failed = True
+                log(f"Ink overlay failed: {error}")
+        self._root.after(delay, self._poll_ink)
 
     def _handle_click(self, _event):
         if not self._visible or self._on_click is None:
@@ -1798,7 +1888,7 @@ class Overlay:
                 self._native_surface.set_completion_progress(progress)
             else:
                 self._canvas.coords(self._check_id, *checkmark_points(progress))
-        elif self._visible and self._state in ("rec", "processing", "paste_failed"):
+        elif self._visible and self._state in ("rec", "processing", "paste_failed", "hint"):
             t = time.perf_counter()
             if self._state == "rec":
                 raw   = self._get_level()
@@ -1943,8 +2033,8 @@ class Overlay:
         win = tk.Toplevel(self._root)
         self._settings_win = win
         win.title("Voice Type Settings")
-        win.geometry("560x460")
-        win.minsize(520, 380)
+        win.geometry("560x490")
+        win.minsize(520, 400)
 
         body = ttk.Frame(win, padding=14)
         body.pack(fill="both", expand=True)
@@ -1959,6 +2049,7 @@ class Overlay:
         enabled_var = tk.BooleanVar(value=bool(state["enabled"]))
         startup_var = tk.BooleanVar(value=bool(state["startup_enabled"]))
         formatter_enabled_var = tk.BooleanVar(value=bool(state["formatter_enabled"]))
+        draw_var = tk.BooleanVar(value=bool(state.get("draw_on_screen_enabled", False)))
 
         final_var = tk.StringVar(value=final_v2l[state["final_model"]])
         stream_var = tk.StringVar(value=stream_v2l[state["stream_model"]])
@@ -2023,6 +2114,14 @@ class Overlay:
         microphone_combo.grid(row=row, column=1, sticky="ew", pady=4)
         row += 1
 
+        if state.get("draw_on_screen_supported"):
+            ttk.Checkbutton(
+                body,
+                text="Draw on screen while holding the key (adds screenshots)",
+                variable=draw_var,
+            ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(10, 0))
+            row += 1
+
         ttk.Checkbutton(body, text="Formatter Enabled", variable=formatter_enabled_var).grid(
             row=row, column=0, columnspan=2, sticky="w", pady=(10, 4)
         )
@@ -2065,6 +2164,8 @@ class Overlay:
                 "formatter_enabled": formatter_enabled_var.get(),
                 "formatter_model": formatter_l2v[formatter_var.get()],
             }
+            if state.get("draw_on_screen_supported"):
+                updates["draw_on_screen_enabled"] = draw_var.get()
             try:
                 on_save(updates)
             except Exception as e:
@@ -2517,17 +2618,23 @@ def transcribe(
     on_segment=None,
     *,
     priority: str = "final",
+    timings: list | None = None,
 ) -> str:
     """Transcribe audio using the final model.
 
     on_segment: optional callable(text: str) called for each non-empty segment
     as it is decoded, before the full result is assembled. Used by hybrid and
     stabilized modes to act on partial output early.
+
+    timings: pass a list to have the decoded segments (with word timings where
+    the model supports them) appended to it. Only dictations with screen
+    marks do this, since word timings cost an extra alignment pass.
     """
     duration = len(audio) / SAMPLE_RATE
     if duration < 0.3:
         return ""
     model    = get_model()
+    options = {"word_timestamps": True} if timings is not None else {}
     def _decode():
         return model.transcribe(
             audio,
@@ -2536,6 +2643,7 @@ def transcribe(
             beam_size=1,
             condition_on_previous_text=False,
             initial_prompt=_whisper_prompt(),
+            **options,
         )
 
     if priority == "final":
@@ -2551,6 +2659,8 @@ def transcribe(
         if not ran or result is None:
             return ""
         segments, info = result
+    if timings is not None:
+        timings.extend(segments)
     parts = []
     for seg in segments:
         text = seg.text.strip()
@@ -2783,12 +2893,80 @@ def _paste_with_feedback(text: str, overlay: "Overlay") -> None:
         overlay.hide()
 
 
+def _place_mark_markers(text: str, marks, timings) -> str:
+    """Add "[n]" for each captured mark where it was drawn in the speech.
+
+    Runs after the formatter, so the LLM never sees the markers. See
+    screen_marks.insert_markers for why.
+    """
+    numbers = marks.numbers()
+    if not numbers:
+        return text
+    words, segments = timings_from_segments(timings or [])
+    spoken = " ".join(unit.text for unit in (words or segments))
+    counts = spoken_word_counts(
+        marks.audio_times(numbers), words=words, segments=segments,
+    )
+    placed = insert_markers(text, spoken, counts, numbers)
+    log(
+        f"Placed {len(numbers)} mark marker(s) using "
+        f"{'word' if words else 'segment' if segments else 'no'} timings."
+    )
+    return placed
+
+
+def _paste_marks_with_feedback(text: str, marks, overlay: "Overlay") -> None:
+    """Paste text and the marks' screenshots, then show how it went.
+
+    Marks on the same window share one screenshot. A mark whose capture
+    failed (or every mark, without Screen Recording permission) just isn't
+    pasted; the words still are.
+    """
+    paths = marks.image_paths()
+    _update_recording(screenshots=paths)
+    images = []
+    for path in paths:
+        try:
+            with open(path, "rb") as f:
+                images.append(f.read())
+        except OSError as error:
+            log(f"Could not read mark screenshot {path}: {error}")
+    if not images:
+        if text.strip():
+            _paste_with_feedback(text, overlay)
+        else:
+            overlay.hide()
+        if marks.permission_missing:
+            overlay.show_screen_recording_hint()
+        return
+    try:
+        with _injection_lock:
+            title = platform.get_foreground_window_title()
+            log(f"Injecting into {title!r}: {text!r} + {len(images)} screenshot(s)")
+            time.sleep(0.05)
+            pasted = platform.inject_text_and_images(text, images, log)
+            time.sleep(0.05)
+    except Exception:
+        overlay.hide()
+        raise
+    if pasted:
+        overlay.show_done(len(text.split()), len(images))
+    else:
+        overlay.show_paste_failed()
+
+
+def _finish_marks_only(marks, overlay: "Overlay", reason: str) -> None:
+    """Marks but no words: paste just the screenshots."""
+    log(f"No words ({reason}); pasting {len(marks.strokes)} mark(s) on their own.")
+    _paste_marks_with_feedback("", marks, overlay)
+
+
 # ---------------------------------------------------------------------------
 # Finalize helpers (one per output mode)
 # ---------------------------------------------------------------------------
 
 def _finish_one_shot(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
-                     t0: float, mode: str):
+                     t0: float, mode: str, marks=None):
     """final_only and hybrid: wait for full transcription then inject once.
 
     hybrid differs from final_only only in that it updates the overlay text
@@ -2799,8 +2977,11 @@ def _finish_one_shot(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
         def on_seg(text: str):
             overlay.show_processing(_wrap_preview(text))
 
+    # Without marks this is exactly the call it always was.
+    timings = [] if marks else None
+    extra = {"timings": timings} if marks else {}
     try:
-        text = transcribe(audio, on_segment=on_seg)
+        text = transcribe(audio, on_segment=on_seg, **extra)
     except Exception as e:
         log(f"Transcription error [{mode}]: {e}")
         _update_recording(status="transcription_error", error=str(e))
@@ -2810,17 +2991,30 @@ def _finish_one_shot(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
     tray.set_state("idle")
     if text:
         text = _maybe_format_final_text(text, mode)
+        if marks:
+            text = _place_mark_markers(text, marks, timings)
         _remember_transcription(text, mode)
         log(f"Done ({elapsed:.2f}s) [{mode}]: {text!r}")
-        _paste_with_feedback(text, overlay)
+        if marks:
+            _paste_marks_with_feedback(text, marks, overlay)
+        else:
+            _paste_with_feedback(text, overlay)
+    elif marks:
+        _finish_marks_only(marks, overlay, f"{elapsed:.2f}s [{mode}]")
     else:
         overlay.hide()
         log(f"Nothing to paste ({elapsed:.2f}s) [{mode}].")
 
 
 def _finish_precompute(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
-                       t0: float, base_text: str, base_samples: int):
+                       t0: float, base_text: str, base_samples: int, marks=None):
     """Precompute mode: reuse best in-recording snapshot, then transcribe tail."""
+    if marks:
+        # The precomputed snapshot has no word timings to place markers
+        # with, so a dictation with marks takes one timed full pass instead.
+        log("[precompute] marks present; running a full timed pass.")
+        _finish_one_shot(audio, overlay, tray, t0, "precompute", marks)
+        return
     overlap_samples = int(PRECOMP_OVERLAP * SAMPLE_RATE)
     total_samples = len(audio)
     use_base = bool(base_text and base_samples > 0 and base_samples < total_samples)
@@ -2867,7 +3061,7 @@ def _finish_precompute(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
 
 
 def _finish_stabilized(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
-                       t0: float):
+                       t0: float, marks=None):
     """Stabilized: inject segments as decoded, then run bounded tail correction."""
     title = platform.get_foreground_window_title()
     log(f"[stabilized] target: {title!r}")
@@ -2930,6 +3124,16 @@ def _finish_stabilized(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
     tray.set_state("idle")
     if first_char_t[0] is not None:
         log(f"[stabilized] first char +{first_char_t[0] - t0:.2f}s, total {elapsed:.2f}s")
+    if marks and marks.numbers():
+        # The words are already typed, so the markers go on the end, then
+        # the screenshots.
+        numbers = marks.numbers()
+        if full_text:
+            _remember_transcription(append_markers(full_text, numbers), "stabilized")
+            log(f"Done ({elapsed:.2f}s) [stabilized]: {full_text!r}")
+        suffix = f" {marker_text(numbers)}" if full_text else ""
+        _paste_marks_with_feedback(suffix, marks, overlay)
+        return
     if full_text:
         # Finish feedback only after every segment and the tail correction
         # return. On macOS a failed segment already played the failure sound
@@ -2944,6 +3148,8 @@ def _finish_stabilized(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
     else:
         overlay.hide()
         log(f"Nothing to paste ({elapsed:.2f}s) [stabilized].")
+    if marks and marks.permission_missing:
+        overlay.show_screen_recording_hint()
 
 
 # ---------------------------------------------------------------------------
@@ -2951,11 +3157,19 @@ def _finish_stabilized(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
 # ---------------------------------------------------------------------------
 
 def run():
-    global _runtime_recorder
+    global _runtime_recorder, _mark_capturer
     # Keep the heartbeat fresh across the (potentially slow) import + startup
     # window, before the hotkey loop takes over refreshing it.
     _write_heartbeat()
     _load_settings()
+    if sys.platform == "darwin":
+        _mark_capturer = MarkCapturer(
+            _screenshot_store,
+            log=log,
+            allowed=platform.screen_capture_allowed,
+            request=platform.request_screen_capture,
+        )
+        _apply_draw_on_screen_setting()
     _cleanup_recordings()
     threading.Thread(
         target=_recording_retention_worker,
@@ -2980,7 +3194,8 @@ def run():
         f"output_mode={_settings['output_mode']!r}  "
         f"microphone_name={_settings['microphone_name']!r}  "
         f"formatter_enabled={_settings['formatter_enabled']!r}  "
-        f"formatter_model={_settings['formatter_model']!r}"
+        f"formatter_model={_settings['formatter_model']!r}  "
+        f"draw_on_screen_enabled={_settings['draw_on_screen_enabled']!r}"
     )
 
     recorder = Recorder()
@@ -3113,6 +3328,8 @@ def run():
         was_down = False
         awaiting_first_audio = False
         first_audio_delay = None
+        mark_session = None
+        audio_origin = 0.0
         recording_session = RecordingSession()
         down_since = 0.0
         forced_stop = False
@@ -3172,6 +3389,9 @@ def run():
                 last_heartbeat = now
 
             raw_down = platform.is_hotkey_down()
+            if sys.platform == "darwin":
+                # Lets the mouse go if a drawing session outlived its key.
+                platform.drawing_watchdog()
             # forced_stop latches a force-stop so we ignore a stuck-down key
             # until it is genuinely released again.
             if not raw_down:
@@ -3215,6 +3435,13 @@ def run():
                             precomputer.start()
                         else:
                             precomputer.stop()
+                        # After the mic is running, so drawing never delays it.
+                        if _mark_capturer is not None:
+                            audio_origin = down_since + capture_ready_delay
+                            mark_session = _mark_capturer.begin()
+                            if not platform.begin_drawing_session():
+                                _mark_capturer.finish([])
+                                mark_session = None
                     else:
                         overlay.hide()
                         tray.set_state("idle")
@@ -3232,6 +3459,16 @@ def run():
 
             elif not is_down and was_down:
                 awaiting_first_audio = False
+                marks = None
+                if mark_session is not None:
+                    # The tap thread already stopped swallowing the mouse at
+                    # key-up; this collects what was drawn.
+                    strokes = platform.end_drawing_session()
+                    capture_session = _mark_capturer.finish(strokes)
+                    mark_session = None
+                    if strokes:
+                        marks = DictationMarks(strokes, capture_session, audio_origin, log=log)
+                        log(f"{len(strokes)} screen mark(s) drawn.")
                 if recording_session.finish_on_release():
                     log("--- Key UP ---")
                     # Stop the streaming preview loop FIRST: if recorder.stop()
@@ -3256,6 +3493,8 @@ def run():
                         "formatter_enabled": bool(_settings.get("formatter_enabled")),
                         "vocabulary": list(_settings.get("vocabulary", [])),
                     }
+                    if marks:
+                        recording_metadata["mark_count"] = len(marks.strokes)
                     mode = _effective_output_mode()
                     if mode == "precompute":
                         precomputer.stop(wait=PRECOMP_STOP_WAIT)
@@ -3267,6 +3506,7 @@ def run():
                         audio=audio,
                         preview=streamer.last_preview,
                         pre_state=pre_state,
+                        marks=marks,
                     ):
                         # Show "processing" with the last streaming preview so the
                         # user sees what was recognised so far while we finalise.
@@ -3294,6 +3534,8 @@ def run():
                             # Give the overlay's main-thread queue enough time
                             # to render the explanation before restart exits.
                             time.sleep(1.5)
+                            if marks:
+                                log("Mark screenshots are kept on disk but not pasted.")
                             return
                         if should_skip_short_low_level_audio(
                             duration_sec=duration,
@@ -3307,6 +3549,8 @@ def run():
                                 "Skipped near-silent clip: "
                                 f"{duration:.2f}s rms={rms:.4f} peak={peak:.4f}"
                             )
+                            if marks:
+                                _finish_marks_only(marks, overlay, "near-silent clip")
                             return
 
                         overlay.show_processing(preview)
@@ -3315,11 +3559,11 @@ def run():
                         log(f"Finalize mode: {mode!r}")
                         if mode == "precompute":
                             base_text, base_samples = pre_state
-                            _finish_precompute(audio, overlay, tray, t0, base_text, base_samples)
+                            _finish_precompute(audio, overlay, tray, t0, base_text, base_samples, marks)
                         elif mode == "stabilized":
-                            _finish_stabilized(audio, overlay, tray, t0)
+                            _finish_stabilized(audio, overlay, tray, t0, marks)
                         else:
-                            _finish_one_shot(audio, overlay, tray, t0, mode)
+                            _finish_one_shot(audio, overlay, tray, t0, mode, marks)
 
                     finish_job = recorder.audio_recovery.prepare_finish(
                         _finish_dictation,
@@ -3353,6 +3597,11 @@ def run():
                     recorder.prepare()
                 elif tray.enabled:
                     log("--- Key UP ignored: recording never started ---")
+
+            elif is_down and mark_session is not None:
+                # A release and re-press between two polls looks like one
+                # long press here, but the tap thread still ended drawing.
+                platform.keep_drawing_session()
 
             was_down = is_down
             time.sleep(POLL_INTERVAL)
