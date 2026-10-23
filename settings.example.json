@@ -5,6 +5,7 @@
   "microphone_name": "Yeti Stereo Microphone",
   "formatter_enabled": false,
   "audio_recording_enabled": false,
+  "draw_on_screen_enabled": true,
   "formatter_model": "qwen2.5-0.5b",
   "corrections": {
     "Q DA": "CUDA",

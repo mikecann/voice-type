@@ -196,7 +196,7 @@ class AppKitOverlaySurface:
         self._content.setFrame_(NSMakeRect(0, 0, width, height))
         self._accent.setFrame_(NSMakeRect(0, 0, _ACCENT_WIDTH, height))
         self._dot.setFrame_(NSMakeRect(_PADDING_X, 13, 14, 16))
-        label_width = _FEEDBACK_LABEL_WIDTH if self._state in ("done", "paste_failed") else _LABEL_WIDTH
+        label_width = _FEEDBACK_LABEL_WIDTH if self._state in ("done", "paste_failed", "hint") else _LABEL_WIDTH
         self._label.setFrame_(NSMakeRect(_PADDING_X + 18, 11, label_width, 18))
         bars_x = width - _PADDING_X - _BARS_WIDTH
         self._bars.setFrame_(NSMakeRect(bars_x, 8, _BARS_WIDTH, 24))
@@ -205,11 +205,12 @@ class AppKitOverlaySurface:
     def set_state(self, state: str, preview: str):
         self._state = state
         label = {"rec": " REC", "done": f" {preview}",
-                 "paste_failed": " Clipboard"}.get(state, " ...")
+                 "paste_failed": " Clipboard",
+                 "hint": " No screenshots"}.get(state, " ...")
         self._label.setStringValue_(label)
         self._preview.setStringValue_("" if state == "done" else preview or "")
         self._bars.setCheckProgress_(0.0 if state == "done" else None)
-        if state in ("done", "paste_failed"):
+        if state in ("done", "paste_failed", "hint"):
             self._bars._bar_heights = [3.0] * 7
         self._set_color(self._state_color())
         self._layout()

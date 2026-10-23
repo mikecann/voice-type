@@ -147,8 +147,19 @@ def split_at_pauses(audio: np.ndarray) -> list[np.ndarray]:
 
 
 @dataclass(frozen=True)
+class MlxWord:
+    start: float
+    end: float
+    word: str
+
+
+@dataclass(frozen=True)
 class MlxSegment:
     text: str
+    # Seconds into the whole recording, so pieces split at pauses line up.
+    start: float = 0.0
+    end: float = 0.0
+    words: tuple[MlxWord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -188,10 +199,16 @@ class MlxWhisperModel:
         # window when condition_on_previous_text is off. Transcribing each
         # window-sized piece separately gives every piece the prompt.
         pieces = split_at_pauses(audio) if prompt else [audio]
+        options = {}
+        # Word timings place screen-mark markers in the text. They cost an
+        # extra alignment pass, so they're only asked for when there are marks.
+        if kwargs.get("word_timestamps"):
+            options["word_timestamps"] = True
         with self._inference_lock:
             try:
                 segments = []
                 first_result = None
+                offset = 0.0
                 for piece in pieces:
                     result = self._mlx_whisper.transcribe(
                         piece,
@@ -200,9 +217,11 @@ class MlxWhisperModel:
                         condition_on_previous_text=kwargs.get("condition_on_previous_text", False),
                         verbose=kwargs.get("verbose", False),
                         initial_prompt=prompt,
+                        **options,
                     )
                     first_result = first_result or result
-                    segments.extend(self._segments_from_result(result))
+                    segments.extend(self._segments_from_result(result, offset))
+                    offset += len(piece) / SAMPLE_RATE
                 info = MlxInfo(
                     language=str(first_result.get("language") or "en"),
                     language_probability=float(first_result.get("language_probability") or 1.0),
@@ -211,9 +230,21 @@ class MlxWhisperModel:
             finally:
                 self._mlx_core.clear_cache()
 
-    def _segments_from_result(self, result: dict) -> list[MlxSegment]:
+    def _segments_from_result(self, result: dict, offset: float = 0.0) -> list[MlxSegment]:
         parts = [
-            MlxSegment(str(segment.get("text", "")).strip())
+            MlxSegment(
+                str(segment.get("text", "")).strip(),
+                start=offset + float(segment.get("start") or 0.0),
+                end=offset + float(segment.get("end") or 0.0),
+                words=tuple(
+                    MlxWord(
+                        offset + float(word.get("start") or 0.0),
+                        offset + float(word.get("end") or 0.0),
+                        str(word.get("word", "")),
+                    )
+                    for word in segment.get("words") or []
+                ),
+            )
             for segment in result.get("segments", [])
             if str(segment.get("text", "")).strip()
         ]

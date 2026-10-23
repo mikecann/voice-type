@@ -91,6 +91,9 @@ you reinstall.
    Required so it can detect the global hotkey and inject text into other apps.
 2. `Microphone`
    Required so it can record your speech.
+3. `Screen & System Audio Recording`
+   Only needed for drawing while you talk (see below). macOS asks the first
+   time you draw. Allow `Voice Type`, then restart it with `voice-type`.
 
 If the hotkey does nothing, or transcription works but text does not paste, check:
 
@@ -109,6 +112,7 @@ or the Python host it launched under.
 | Hold the hotkey | Recording starts and an animated overlay appears at the bottom-centre of your monitor |
 | Keep holding | Waveform bars respond to your voice and partial transcription builds up below them |
 | Release the hotkey | Final transcription runs and text is pasted into the active window |
+| Drag with the mouse while holding (macOS) | Draws in red on screen, and each mark is pasted as a screenshot after the text |
 | Open settings | On Windows use the tray icon, on macOS use Spotlight `Voice Type` or `open-settings-mac.sh` |
 
 The text is injected into whatever window had focus when you released the key,
@@ -118,6 +122,41 @@ Hotkey by platform:
 
 - **Windows**: Right Ctrl
 - **macOS**: F12 or Right Ctrl
+
+### Drawing while you talk (macOS)
+
+I spend a lot of my day reviewing UI with coding agents, and I got tired of
+stopping to take a screenshot, scribble an arrow on it, paste it, and then
+start talking. So now the mouse becomes a pen while the hotkey is held.
+
+Hold the key, talk, and drag on the screen to point at things. A quick click
+leaves a ring, a straight drag becomes an arrow, and anything else (a circle,
+a scribble) stays as you drew it. Each mark gets a little number. When you let
+go, the text is pasted with `[1]`, `[2]` and so on where you were talking
+when you drew each mark, and then a screenshot of each mark is pasted after
+it, one by one. That works nicely in T3 Code, Slack and Chrome web apps,
+which turn pasted images into attachments.
+
+A few details:
+
+- Clicks and drags only turn into ink while the key is down. Moving the mouse
+  without a button pressed still works as normal, and nothing reaches the app
+  underneath while you draw.
+- Each screenshot is just the window under that mark, with only that mark
+  drawn on it, shrunk so its long edge is at most 2000 px. Over bare desktop
+  it grabs a chunk of the screen instead. You can make up to 10 marks per
+  dictation.
+- If you draw but don't say anything, only the screenshots are pasted.
+- Screenshots are saved in a `screenshots` folder under the application-data
+  directory and deleted after 7 days. With `audio_recording_enabled` on, the
+  dictation's metadata lists them too.
+- It needs Screen Recording permission. Without it your words still paste and
+  the pill says so.
+- Turn it off with **Draw on screen while holding the key** in Settings.
+
+`debug_mark_capture.py` checks capture and paste without holding the key.
+Run it with the installed runtime's Python and see the top of the file for
+examples.
 
 ---
 
@@ -318,6 +357,7 @@ Useful keys:
 | `microphone_name`    | `"Yeti Stereo Microphone"` | Input device selected in Settings. Choose System Default to follow the operating-system input |
 | `formatter_enabled`  | `false`          | Turn local transcript cleanup on/off |
 | `audio_recording_enabled` | `false`      | Save local audio and matching diagnostic metadata for 30 days |
+| `draw_on_screen_enabled` | `true` on macOS | Let the mouse draw marks while the hotkey is held, and paste a screenshot of each one. Ignored on Windows |
 | `formatter_model`    | `"qwen2.5-0.5b"` | Local cleanup model preset |
 | `corrections`        | `{...}`          | Exact phrase replacements applied after transcription |
 | `vocabulary`         | `[...]`          | Names and jargon Whisper should expect, like `"Tailscale"` or `"Sammy Cam"`. They become Whisper's prompt, which also keeps capitals and punctuation on short dictations |
@@ -383,6 +423,10 @@ pyobjc-framework-Cocoa native macOS integration
 | `voice-type.py`       | Main script: audio, tray UI, transcription, injection   |
 | `speech_backends.py`  | Backend selection and the MLX Whisper adapter            |
 | `text_formatter.py`   | Local LLM formatting guardrails and GGUF backend         |
+| `screen_marks.py`     | Mark shapes, window choice, coordinates and `[n]` markers |
+| `mark_capture.py`     | Captures and annotates a screenshot for each mark (macOS) |
+| `appkit_ink.py`       | The live red ink overlay (macOS)                         |
+| `debug_mark_capture.py` | Tries capture and paste without holding the key        |
 | `benchmark_formatter.py` | Quick local benchmark for formatter model experiments |
 | `tests/test_text_formatter.py` | Unit tests for formatter validation and fallback |
 | `tests/test_speech_backends.py` | Unit tests for backend selection logic          |
