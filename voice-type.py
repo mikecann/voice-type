@@ -271,6 +271,7 @@ from audio_gate import (
     FLATLINE_RECORDING_MESSAGE,
     FLATLINE_RECOVERY_MESSAGE,
     is_flatline_audio_capture,
+    guard_repetition_loops,
     should_skip_short_low_level_audio,
 )
 from runtime_policy import (
@@ -2667,7 +2668,13 @@ def transcribe(
         if text:
             parts.append(text)
     raw_transcript = " ".join(parts).strip()
-    result = _apply_corrections(raw_transcript)
+    guarded = guard_repetition_loops(raw_transcript, duration_sec=duration)
+    if guarded != raw_transcript:
+        log(
+            f"Repetition loop {'dropped' if not guarded else 'collapsed'}: "
+            f"{len(raw_transcript.split())} words from {duration:.1f}s → {guarded!r}"
+        )
+    result = _apply_corrections(guarded)
     if priority == "final":
         _update_recording(raw_transcript=raw_transcript, decoded_text=result)
     if verbose:

@@ -116,5 +116,39 @@ class AudioGateTests(unittest.TestCase):
         )
 
 
+
+class RepetitionLoopGuardTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.guard = staticmethod(load_module().guard_repetition_loops)
+
+    def test_drops_a_clip_that_is_only_a_loop(self):
+        # Both of these were pasted for real in October 2026.
+        self.assertEqual("", self.guard(" ".join(["making"] * 300), duration_sec=1.4))
+        self.assertEqual("", self.guard("Call us " * 100 + "Call", duration_sec=0.4))
+        self.assertEqual("", self.guard("Flare. Flare. Flare. Flare. Flare. Flare. Flare. Flare.", duration_sec=2.0))
+
+    def test_collapses_a_loop_after_real_words(self):
+        text = "I think we should ship it today. " + "the " * 40
+        self.assertEqual(
+            "I think we should ship it today. the",
+            self.guard(text.strip(), duration_sec=6.0),
+        )
+
+    def test_keeps_a_few_repeats_at_a_normal_pace(self):
+        self.assertEqual("No, no, no, no.", self.guard("No, no, no, no.", duration_sec=1.5))
+        self.assertEqual(
+            "Okay, okay, okay, okay, let's go.",
+            self.guard("Okay, okay, okay, okay, let's go.", duration_sec=2.5),
+        )
+
+    def test_four_repeats_count_when_they_came_out_too_fast(self):
+        self.assertEqual("", self.guard("Call us Call us Call us Call us", duration_sec=0.5))
+
+    def test_leaves_ordinary_text_alone(self):
+        for text in ["", "Merge it.", "Can you take a look at the PR, please?"]:
+            self.assertEqual(text, self.guard(text, duration_sec=2.0))
+
+
 if __name__ == "__main__":
     unittest.main()
