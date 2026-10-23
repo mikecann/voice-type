@@ -7,6 +7,10 @@ its own with `screencapture -l`, which is Apple's supported tool and still
 works on macOS 26, where CGWindowListCreateImage is obsoleted. Over bare
 desktop a generous region of that display is captured instead.
 
+Marks on the same window share one screenshot. Each new mark on a window
+redraws all of that window's marks onto its own, newer capture and replaces
+the file, so the work is done before key-up and pasting doesn't wait on it.
+
 Quartz and Pillow are imported lazily, so this module loads anywhere and
 its logic can be tested with fakes.
 """
@@ -112,6 +116,21 @@ class CaptureTarget:
     rect: tuple[float, float, float, float]
     args: list[str]
     description: str
+    # The window's number, or None for a desktop region.
+    window: int | None = None
+
+    @property
+    def group_key(self):
+        """Marks with the same key share one screenshot.
+
+        Only windows group, and only while they stay put: if a window moved
+        or resized between marks, the earlier marks' ink wouldn't line up
+        with a newer capture. Desktop regions are centred on each mark, so
+        they never match.
+        """
+        if self.window is None:
+            return None
+        return self.window, tuple(self.rect)
 
 
 def capture_target(stroke: Stroke, windows, displays, own_pid: int) -> CaptureTarget | None:
@@ -122,7 +141,9 @@ def capture_target(stroke: Stroke, windows, displays, own_pid: int) -> CaptureTa
         number = int(window.get("kCGWindowNumber", 0))
         owner = window.get("kCGWindowOwnerName") or "window"
         # -o leaves the window's shadow out, so the ink offsets are exact.
-        return CaptureTarget(window_rect(window), ["-o", "-l", str(number)], f"{owner} #{number}")
+        return CaptureTarget(
+            window_rect(window), ["-o", "-l", str(number)], f"{owner} #{number}", window=number,
+        )
     display = display_containing(displays, anchor)
     if display is None:
         return None
@@ -145,11 +166,22 @@ def _font(size: int):
         return ImageFont.load_default()
 
 
-def draw_shapes(image, shapes) -> None:
-    """Draw one mark's ink and number badge onto a Pillow RGBA image."""
+def draw_marks(image, marks) -> None:
+    """Draw several marks' ink and number badges onto a Pillow RGBA image.
+
+    All the ink goes down first and the badges on top, so a later mark's
+    line never covers an earlier mark's number.
+    """
     from PIL import ImageDraw
 
     draw = ImageDraw.Draw(image)
+    for shapes in marks:
+        _draw_ink(draw, shapes)
+    for shapes in marks:
+        _draw_badge(draw, shapes)
+
+
+def _draw_ink(draw, shapes) -> None:
     width = max(1, round(shapes.width))
     if len(shapes.line) > 1:
         draw.line(shapes.line, fill=INK_RGB, width=width, joint="curve")
@@ -162,6 +194,9 @@ def draw_shapes(image, shapes) -> None:
     if shapes.ring is not None:
         (cx, cy), r = shapes.ring
         draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=INK_RGB, width=width)
+
+
+def _draw_badge(draw, shapes) -> None:
     (bx, by), br = shapes.badge
     draw.ellipse(
         (bx - br, by - br, bx + br, by + br),
@@ -174,24 +209,55 @@ def draw_shapes(image, shapes) -> None:
     draw.text((bx, by), label, fill=BADGE_TEXT_RGB, font=font, anchor="mm")
 
 
-def composite_png(png: bytes, capture_rect, stroke: Stroke, max_edge: int = MAX_IMAGE_EDGE) -> bytes:
-    """Draw `stroke` onto a capture of `capture_rect` and return a PNG."""
+def composite_png(png: bytes, capture_rect, strokes, max_edge: int = MAX_IMAGE_EDGE) -> bytes:
+    """Draw every mark in `strokes` onto one capture of `capture_rect` and
+    return a small PNG."""
     from PIL import Image
 
     image = Image.open(io.BytesIO(png)).convert("RGBA")
     scale = image.width / capture_rect[2] if capture_rect[2] else 1.0
-    shapes = ink_shapes(
-        stroke,
-        transform=lambda p: to_image(p, capture_rect, image.size),
-        scale=scale,
-    )
-    draw_shapes(image, shapes)
+    draw_marks(image, [
+        ink_shapes(
+            stroke,
+            transform=lambda p: to_image(p, capture_rect, image.size),
+            scale=scale,
+        )
+        for stroke in sorted(strokes, key=lambda s: s.number)
+    ])
     size = fit_long_edge(image.width, image.height, max_edge)
     if size != image.size:
         image = image.resize(size, Image.LANCZOS)
+    # 256 colours is plenty for app windows with flat red ink, and with the
+    # resize takes a typical window from about 1 MB to under 200 KB, so
+    # pastes upload faster. FASTOCTREE is the Pillow quantizer that keeps
+    # the alpha channel, so window captures keep their transparent rounded
+    # corners, and without dithering text stays crisp instead of speckled.
+    # It stays a PNG: Chromium apps re-encode other pasted image types to
+    # PNG anyway, so a JPEG wouldn't make what they receive any smaller.
+    image = image.quantize(colors=256, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE)
+    _snap_alpha(image)
     out = io.BytesIO()
-    image.save(out, format="PNG", optimize=False)
+    image.save(out, format="PNG", optimize=True)
     return out.getvalue()
+
+
+def _snap_alpha(image) -> None:
+    """Make a quantized window opaque again.
+
+    FASTOCTREE averages every colour in a bucket, alpha included, so the
+    body of a window can come out at 254 when some of its antialiased
+    corner pixels land in the same bucket. Anything within 16 levels of
+    opaque or clear is snapped back; on a corner's edge nobody can see it.
+    """
+    palette = image.getpalette("RGBA")
+    if not palette:
+        return
+    for i in range(3, len(palette), 4):
+        if palette[i] >= 240:
+            palette[i] = 255
+        elif palette[i] < 16:
+            palette[i] = 0
+    image.putpalette(palette, "RGBA")
 
 
 def capture_mark(
@@ -201,16 +267,15 @@ def capture_mark(
     windows=None,
     displays=None,
     capture=None,
-    composite=None,
 ) -> tuple[bytes, CaptureTarget] | None:
+    """Capture what's under `stroke`, without ink: (raw PNG, target)."""
     windows = list_windows() if windows is None else windows
     displays = list_displays() if displays is None else displays
     capture = capture or run_screencapture
-    composite = composite or composite_png
     target = capture_target(stroke, windows, displays, own_pid)
     if target is None:
         return None
-    return composite(capture(target.args), target.rect, stroke), target
+    return capture(target.args), target
 
 
 # ---------------------------------------------------------------------------
@@ -218,15 +283,30 @@ def capture_mark(
 # ---------------------------------------------------------------------------
 
 @dataclass
+class _Group:
+    """Marks sharing one window's screenshot, and that screenshot's file."""
+
+    strokes: list
+    path: str
+
+
+@dataclass
 class CaptureSession:
     """One dictation's screenshots, filled in by the capture worker."""
 
     ident: int
     submitted: set = field(default_factory=set)
+    # Mark number -> the file showing it, or None if it failed. Marks that
+    # share a window all point at the same file.
     paths: dict = field(default_factory=dict)
     permission_missing: bool = False
     done: threading.Condition = field(default_factory=threading.Condition)
     expected: set | None = None
+    # Set once finalization has taken the paths, so a late re-composite
+    # doesn't delete a file that's about to be pasted.
+    collected: bool = False
+    # CaptureTarget.group_key -> _Group. Only the worker touches this.
+    groups: dict = field(default_factory=dict)
 
     def wait(self, timeout: float) -> list[tuple[int, str]]:
         """Block until every expected mark is captured (or failed), then
@@ -240,6 +320,7 @@ class CaptureSession:
                 if remaining <= 0:
                     break
                 self.done.wait(remaining)
+            self.collected = True
             return sorted((n, p) for n, p in self.paths.items() if p)
 
 
@@ -253,6 +334,7 @@ class MarkCapturer:
         log,
         own_pid: int | None = None,
         capture=None,
+        composite=None,
         allowed=None,
         request=None,
     ) -> None:
@@ -260,6 +342,7 @@ class MarkCapturer:
         self._log = log
         self._own_pid = os.getpid() if own_pid is None else own_pid
         self._capture = capture or (lambda stroke: capture_mark(stroke, own_pid=self._own_pid))
+        self._composite = composite or composite_png
         self._allowed = allowed
         self._request = request
         self._requested = False
@@ -329,24 +412,45 @@ class MarkCapturer:
     def _worker(self) -> None:
         while True:
             session, stroke = self._queue.get()
-            path = None
             try:
                 if self._permission_ok(session):
-                    result = self._capture(stroke)
-                    if result is None:
-                        self._log(f"Mark {stroke.number}: nothing to capture.")
-                    else:
-                        png, target = result
-                        path = self._store.save(png, stroke.number)
-                        self._log(
-                            f"Mark {stroke.number} ({stroke.kind}) captured from "
-                            f"{target.description}: {path}"
-                        )
+                    self._capture_into(session, stroke)
             except Exception as error:
                 self._log(f"Mark {stroke.number} capture failed: {error}")
             with session.done:
-                session.paths[stroke.number] = path
+                # A captured mark already has its path; this settles a
+                # failed one so wait() stops expecting it.
+                session.paths.setdefault(stroke.number, None)
                 session.done.notify_all()
+
+    def _capture_into(self, session: CaptureSession, stroke: Stroke) -> None:
+        """Capture one mark and draw it, plus any earlier marks on the same
+        window, onto that capture."""
+        result = self._capture(stroke)
+        if result is None:
+            self._log(f"Mark {stroke.number}: nothing to capture.")
+            return
+        raw, target = result
+        key = target.group_key
+        group = session.groups.get(key) if key is not None else None
+        strokes = sorted([*(group.strokes if group else []), stroke], key=lambda s: s.number)
+        png = self._composite(raw, target.rect, strokes)
+        path = self._store.save(png, strokes[0].number)
+        numbers = [s.number for s in strokes]
+        with session.done:
+            for number in numbers:
+                session.paths[number] = path
+            keep_old = session.collected
+        if key is not None:
+            session.groups[key] = _Group(strokes, path)
+        self._log(
+            f"Mark {stroke.number} ({stroke.kind}) captured from "
+            f"{target.description}: {path}"
+        )
+        if group is not None:
+            self._log(f"Marks {numbers} share {target.description}: one screenshot.")
+            if not keep_old:
+                self._store.discard(group.path)
 
 
 @dataclass
@@ -364,7 +468,7 @@ class DictationMarks:
     log: object = None
     _shots: list | None = None
 
-    def screenshots(self) -> list[tuple[int, str]]:
+    def _collect(self) -> list[tuple[int, str]]:
         """(number, path) for every mark that was captured, waiting once."""
         if self._shots is None:
             timeout = self.wait_timeout + self.wait_per_mark * len(self.strokes)
@@ -376,6 +480,19 @@ class DictationMarks:
             if missing and self.log is not None:
                 self.log(f"Mark(s) {missing} have no screenshot to paste.")
         return self._shots
+
+    def numbers(self) -> list[int]:
+        """Every captured mark's number, for the "[n]" markers in the text."""
+        return [number for number, _path in self._collect()]
+
+    def image_paths(self) -> list[str]:
+        """One file per screenshot to paste, in order of each one's lowest
+        mark number. Marks on the same window share a file."""
+        paths = []
+        for _number, path in self._collect():
+            if path not in paths:
+                paths.append(path)
+        return paths
 
     @property
     def permission_missing(self) -> bool:

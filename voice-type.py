@@ -2899,7 +2899,7 @@ def _place_mark_markers(text: str, marks, timings) -> str:
     Runs after the formatter, so the LLM never sees the markers. See
     screen_marks.insert_markers for why.
     """
-    numbers = [number for number, _path in marks.screenshots()]
+    numbers = marks.numbers()
     if not numbers:
         return text
     words, segments = timings_from_segments(timings or [])
@@ -2916,15 +2916,16 @@ def _place_mark_markers(text: str, marks, timings) -> str:
 
 
 def _paste_marks_with_feedback(text: str, marks, overlay: "Overlay") -> None:
-    """Paste text and each mark's screenshot, then show how it went.
+    """Paste text and the marks' screenshots, then show how it went.
 
-    A mark whose capture failed (or every mark, without Screen Recording
-    permission) just isn't pasted; the words still are.
+    Marks on the same window share one screenshot. A mark whose capture
+    failed (or every mark, without Screen Recording permission) just isn't
+    pasted; the words still are.
     """
-    shots = marks.screenshots()
-    _update_recording(screenshots=[path for _number, path in shots])
+    paths = marks.image_paths()
+    _update_recording(screenshots=paths)
     images = []
-    for _number, path in shots:
+    for path in paths:
         try:
             with open(path, "rb") as f:
                 images.append(f.read())
@@ -3123,10 +3124,10 @@ def _finish_stabilized(audio: np.ndarray, overlay: "Overlay", tray: "TrayIcon",
     tray.set_state("idle")
     if first_char_t[0] is not None:
         log(f"[stabilized] first char +{first_char_t[0] - t0:.2f}s, total {elapsed:.2f}s")
-    if marks and marks.screenshots():
+    if marks and marks.numbers():
         # The words are already typed, so the markers go on the end, then
         # the screenshots.
-        numbers = [number for number, _path in marks.screenshots()]
+        numbers = marks.numbers()
         if full_text:
             _remember_transcription(append_markers(full_text, numbers), "stabilized")
             log(f"Done ({elapsed:.2f}s) [stabilized]: {full_text!r}")

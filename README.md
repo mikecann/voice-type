@@ -112,7 +112,7 @@ or the Python host it launched under.
 | Hold the hotkey | Recording starts and an animated overlay appears at the bottom-centre of your monitor |
 | Keep holding | Waveform bars respond to your voice and partial transcription builds up below them |
 | Release the hotkey | Final transcription runs and text is pasted into the active window |
-| Drag with the mouse while holding (macOS) | Draws in red on screen, and each mark is pasted as a screenshot after the text |
+| Drag with the mouse while holding (macOS) | Draws in red on screen, and a screenshot of each window you marked is pasted after the text |
 | Open settings | On Windows use the tray icon, on macOS use Spotlight `Voice Type` or `open-settings-mac.sh` |
 
 The text is injected into whatever window had focus when you released the key,
@@ -133,19 +133,26 @@ Hold the key, talk, and drag on the screen to point at things. A quick click
 leaves a ring, a straight drag becomes an arrow, and anything else (a circle,
 a scribble) stays as you drew it. Each mark gets a little number. When you let
 go, the text is pasted with `[1]`, `[2]` and so on where you were talking
-when you drew each mark, and then a screenshot of each mark is pasted after
-it, one by one. T3 Code, Slack and Chrome web apps turn pasted images into
-attachments, so that's where it's most handy.
+when you drew each mark, and then the screenshots are pasted after it, one by
+one. Marks on the same window all end up on one screenshot of it, so if you
+circle three things in one app you get a single picture with 1, 2 and 3 on
+it. T3 Code, Slack and Chrome web apps turn pasted images into attachments,
+so that's where it's most handy.
 
 A few details:
 
 - Clicks and drags only turn into ink while the key is down. Moving the mouse
   without a button pressed still works as normal, and nothing reaches the app
   underneath while you draw.
-- Each screenshot is just the window under that mark, with only that mark
-  drawn on it, shrunk so its long edge is at most 2000 px. Over bare desktop
-  it grabs a chunk of the screen instead. You can make up to 10 marks per
-  dictation.
+- Each screenshot is just the window under the marks, with every mark you
+  made on that window drawn on it. If you move or resize the window part way
+  through, the marks after that get their own screenshot so the ink still
+  lines up. Over bare desktop it grabs a chunk of the screen around each mark
+  instead. You can make up to 10 marks per dictation.
+- To keep pastes small, screenshots are shrunk so the long edge is at most
+  1568 px (Claude shrinks anything bigger than that anyway) and saved as 256
+  colour PNGs. That takes a typical window from about 1 MB down to under
+  200 KB, and the text still looks sharp.
 - If you draw but don't say anything, only the screenshots are pasted.
 - Screenshots are saved in a `screenshots` folder under the application-data
   directory and deleted after 7 days. With `audio_recording_enabled` on, the
@@ -359,7 +366,7 @@ Useful keys:
 | `microphone_name`    | `"Yeti Stereo Microphone"` | Input device selected in Settings. Choose System Default to follow the operating-system input |
 | `formatter_enabled`  | `false`          | Turn local transcript cleanup on/off |
 | `audio_recording_enabled` | `false`      | Save local audio and matching diagnostic metadata for 30 days |
-| `draw_on_screen_enabled` | `true` on macOS | Let the mouse draw marks while the hotkey is held, and paste a screenshot of each one. Ignored on Windows |
+| `draw_on_screen_enabled` | `true` on macOS | Let the mouse draw marks while the hotkey is held, and paste a screenshot of each window you marked. Ignored on Windows |
 | `formatter_model`    | `"qwen2.5-0.5b"` | Local cleanup model preset |
 | `corrections`        | `{...}`          | Exact phrase replacements applied after transcription |
 | `vocabulary`         | `[...]`          | Names and jargon Whisper should expect, like `"Tailscale"` or `"Sammy Cam"`. They become Whisper's prompt, which also keeps capitals and punctuation on short dictations |
@@ -426,7 +433,7 @@ pyobjc-framework-Cocoa native macOS integration
 | `speech_backends.py`  | Backend selection and the MLX Whisper adapter            |
 | `text_formatter.py`   | Local LLM formatting guardrails and GGUF backend         |
 | `screen_marks.py`     | Mark shapes, window choice, coordinates and `[n]` markers |
-| `mark_capture.py`     | Captures and annotates a screenshot for each mark (macOS) |
+| `mark_capture.py`     | Captures each marked window and draws its marks on (macOS) |
 | `appkit_ink.py`       | The live red ink overlay (macOS)                         |
 | `debug_mark_capture.py` | Tries capture and paste without holding the key        |
 | `benchmark_formatter.py` | Quick local benchmark for formatter model experiments |

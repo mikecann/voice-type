@@ -24,7 +24,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 MAX_MARKS = 10
-MAX_IMAGE_EDGE = 2000
+# Claude shrinks anything with a longer edge than this before the model sees
+# it, so sending more pixels only makes the paste bigger.
+MAX_IMAGE_EDGE = 1568
 SCREENSHOT_RETENTION_DAYS = 7
 
 # A click wobbles a few points; anything inside this is a point mark.
@@ -523,6 +525,19 @@ class ScreenshotStore:
             finally:
                 temporary.unlink(missing_ok=True)
         return str(target)
+
+    def discard(self, path) -> bool:
+        """Delete a screenshot this store saved, such as one replaced by a
+        newer composite of the same window. Anything else is left alone."""
+        target = Path(path)
+        if target.parent != self.path or not _SCREENSHOT_FILE.fullmatch(target.name):
+            return False
+        with self._lock:
+            try:
+                target.unlink()
+            except OSError:
+                return False
+        return True
 
     def cleanup(self) -> int:
         cutoff = self._clock().astimezone(timezone.utc) - timedelta(days=self.retention_days)

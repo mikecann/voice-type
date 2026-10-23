@@ -168,8 +168,8 @@ class CoordinateTests(unittest.TestCase):
         self.assertEqual((20, 30), sm.to_image((-1900, 1147), rect, (1920, 1080)))
 
     def test_long_edge_is_capped(self):
-        self.assertEqual((2000, 1250), sm.fit_long_edge(3456, 2160))
-        self.assertEqual((1250, 2000), sm.fit_long_edge(2160, 3456))
+        self.assertEqual((1568, 980), sm.fit_long_edge(3456, 2160))
+        self.assertEqual((980, 1568), sm.fit_long_edge(2160, 3456))
         self.assertEqual((800, 600), sm.fit_long_edge(800, 600))
 
     def test_display_lookup_and_nearest_fallback(self):
@@ -351,6 +351,23 @@ class ScreenshotStoreTests(unittest.TestCase):
             self.assertEqual(b"new png", pathlib.Path(recent).read_bytes())
             self.assertTrue(unrelated.exists())
             self.assertTrue(recent.endswith("_2.png"))
+
+    def test_discards_its_own_files_and_nothing_else(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = sm.ScreenshotStore(pathlib.Path(tmp) / "screenshots")
+            first = store.save(b"one mark", 1)
+            unrelated = pathlib.Path(tmp) / "screenshots" / "keep-me.png"
+            unrelated.write_bytes(b"x")
+            outside = pathlib.Path(tmp) / pathlib.Path(first).name
+            outside.write_bytes(b"x")
+
+            self.assertTrue(store.discard(first))
+            self.assertFalse(pathlib.Path(first).exists())
+            self.assertFalse(store.discard(first))
+            self.assertFalse(store.discard(str(unrelated)))
+            self.assertFalse(store.discard(str(outside)))
+            self.assertTrue(unrelated.exists())
+            self.assertTrue(outside.exists())
 
     def test_cleanup_without_a_folder_is_a_no_op(self):
         with tempfile.TemporaryDirectory() as tmp:

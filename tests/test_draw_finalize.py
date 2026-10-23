@@ -132,6 +132,17 @@ class DrawFinalizeTests(unittest.TestCase):
         text = self.ns["platform"].inject_text_and_images.call_args.args[0]
         self.assertEqual("This button [1] is broken, and this [2] one too.", text)
 
+    def test_marks_sharing_a_window_get_both_markers_and_one_image(self):
+        self.ns["transcribe"].side_effect = self.transcribe_with_timings
+        shared = self.paths[0][1]
+        self.finish(self.marks(shots=[(1, shared), (2, shared)]))
+
+        text, images, _log = self.ns["platform"].inject_text_and_images.call_args.args
+        self.assertEqual("This button [1] is broken and this [2] one too", text)
+        self.assertEqual([b"png 1"], images)
+        self.overlay.show_done.assert_called_once_with(10, 1)
+        self.ns["_update_recording"].assert_any_call(screenshots=[shared])
+
     def test_a_failed_capture_drops_its_marker(self):
         self.ns["transcribe"].side_effect = self.transcribe_with_timings
         self.finish(self.marks(shots=[self.paths[1]]))
@@ -185,6 +196,19 @@ class DrawFinalizeTests(unittest.TestCase):
         text, images, _log = self.ns["platform"].inject_text_and_images.call_args.args
         self.assertEqual(" [1] [2]", text)
         self.assertEqual([b"png 1", b"png 2"], images)
+
+    def test_stabilized_with_a_shared_window_pastes_one_image(self):
+        self.ns["transcribe"].return_value = "Look here"
+        shared = self.paths[1][1]
+        self.ns["_finish_stabilized"](
+            np.zeros(100), self.overlay, self.tray, 0,
+            self.marks(shots=[(1, shared), (2, shared)]),
+        )
+
+        text, images, _log = self.ns["platform"].inject_text_and_images.call_args.args
+        self.assertEqual(" [1] [2]", text)
+        self.assertEqual([b"png 2"], images)
+        self.ns["_remember_transcription"].assert_called_once_with("Look here [1] [2]", "stabilized")
 
 
 if __name__ == "__main__":

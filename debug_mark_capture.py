@@ -88,10 +88,16 @@ def cmd_capture(args) -> int:
     if result is None:
         print("Nothing to capture.", file=sys.stderr)
         return 1
-    png, target = result
+    raw, target = result
+    captured = time.perf_counter()
+    png = mark_capture.composite_png(raw, target.rect, [stroke])
     path = store.save(png, stroke.number)
-    elapsed = (time.perf_counter() - started) * 1000
-    print(f"Mark kind: {stroke.kind}; captured {target.description} in {elapsed:.0f} ms")
+    finished = time.perf_counter()
+    print(
+        f"Mark kind: {stroke.kind}; captured {target.description} in "
+        f"{(captured - started) * 1000:.0f} ms, drawn in {(finished - captured) * 1000:.0f} ms "
+        f"({len(raw) // 1024} KB -> {len(png) // 1024} KB)"
+    )
     print(path)
     return 0
 
