@@ -29,7 +29,8 @@ public protocol PillPresenting: AnyObject, Sendable {
     func showDone(words: Int)
     /// Words and screenshots pasted, for a dictation with screen marks.
     func showDone(words: Int, shots: Int)
-    func showPasteFailed()
+    /// The paste didn't land. With `miss`, focus wasn't on a text box, and the pill says so.
+    func showPasteFailed(_ miss: FocusMiss?)
     /// Marks were drawn but Screen Recording isn't allowed, so there are no screenshots.
     func showScreenRecordingHint()
     /// The paste landed, but the old clipboard couldn't be read, so it wasn't put back.
@@ -295,7 +296,7 @@ public final class Finaliser: @unchecked Sendable {
             pill.showDone(words: outcome.words)
         } else {
             // The text was left on the clipboard and Funk played.
-            pill.showPasteFailed()
+            pill.showPasteFailed(pasted.focusMiss)
         }
     }
 
@@ -395,7 +396,7 @@ public final class Finaliser: @unchecked Sendable {
         } else if pasted.landed {
             pill.showDone(words: PythonText.split(text).count, shots: images.count)
         } else {
-            pill.showPasteFailed()
+            pill.showPasteFailed(pasted.focusMiss)
         }
     }
 

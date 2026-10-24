@@ -185,7 +185,7 @@ final class MainThreadPill: PillPresenting, @unchecked Sendable {
     func showDone(words: Int) { onMain { $0.showDone(words: words) } }
     func showDone(words: Int, shots: Int) { onMain { $0.showDone(words: words, shots: shots) } }
     func showScreenRecordingHint() { onMain { $0.showScreenRecordingHint() } }
-    func showPasteFailed() { onMain { $0.showPasteFailed() } }
+    func showPasteFailed(_ miss: FocusMiss?) { onMain { $0.showPasteFailed(miss) } }
     func showClipboardNotKept() { onMain { $0.showClipboardNotKept() } }
     func hide() { onMain { $0.hide() } }
 }

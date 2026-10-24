@@ -38,9 +38,9 @@ public final class DrawingSession: @unchecked Sendable {
 
     public var isAvailable: Bool { lock.withLock { setTap != nil } }
 
-    /// Starts a session for a recording that has just started, after the microphone, so
-    /// drawing never delays it. Called on the controller's queue, never on the tap thread.
-    /// If the key has already gone up again, nothing starts.
+    /// Starts a session at key-down, just before the microphone opens. Called on the
+    /// controller's queue, never on the tap thread. If the key has already gone up again,
+    /// nothing starts.
     public func begin() -> Bool {
         let started: Bool = lock.withLock {
             guard setTap != nil, isKeyDown() else { return false }

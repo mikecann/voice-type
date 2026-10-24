@@ -112,6 +112,9 @@ public final class DictationController: @unchecked Sendable {
     /// The microphone check reports at least every ~10 s (each probe step is bounded at 2 s),
     /// so this long without a word means its thread is stuck inside Core Audio.
     public static let readinessStallSeconds = 30.0
+    /// The plan's budget from key-down to recording is 20 ms; a start ten times that gets a
+    /// line in the log.
+    public static let slowMicrophoneStart = 0.2
 
     private let ports: Ports
     public private(set) var phase: Phase = .starting
@@ -379,9 +382,19 @@ public final class DictationController: @unchecked Sendable {
         // Clear any completion feedback; REC appears with the first audio.
         ports.pill.hide()
         generation += 1
+        // Drawing starts before the microphone, not after. Opening a stream that wasn't
+        // prepared can take a few hundred ms, and a click in that time went straight to the
+        // app underneath and could move its focus off the text box the words were for.
+        // Switching the mouse tap on is one quick call, so it doesn't hold the microphone up.
+        // Drawing still never starts for a key-down that can't dictate: every gate (paused,
+        // starting, no model, finalising, drawing off) has passed by now, and the microphone,
+        // the one thing left that can fail, abandons the session below.
+        let marks = settings.drawOnScreenEnabled ? ports.marks : nil
+        marks?.begin(wordTimings: settings.markerTimings == .accurate)
         let result = ports.recorder.start()
         let ready = ports.now() - downSince
-        guard case .started = result else {
+        guard case let .started(reused) = result else {
+            marks?.abandon()
             if case let .failed(why) = result {
                 ports.log("Microphone stream could not open: \(why). Voice Type will reconnect the microphone.")
             }
@@ -395,6 +408,12 @@ public final class DictationController: @unchecked Sendable {
             return
         }
         lastStartFailed = false
+        if ready > Self.slowMicrophoneStart {
+            ports.log(String(format: "Slow microphone start: %.0f ms from key-down to recording%@.", ready * 1000,
+                             reused ? "" : " (the stream had to be opened first)"))
+        }
+        // The first sample was captured about when start() returned.
+        marks?.microphoneStarted(audioOrigin: downSince + ready)
         phase = .recording
         recording = ActiveRecording(generation: generation, downSince: downSince, target: target, captureReadyDelay: ready,
                                     firstAudioDelay: nil, settings: settings)
@@ -404,11 +423,6 @@ public final class DictationController: @unchecked Sendable {
         let gen = generation
         capTimer = ports.queue.schedule(after: Deadlines.maxRecording) { [weak self] in self?.capReached(gen) }
         schedulePreview(gen)
-        // After the microphone is running, so drawing never delays it. The first sample was
-        // captured about when start() returned.
-        if settings.drawOnScreenEnabled {
-            ports.marks?.begin(audioOrigin: downSince + ready, wordTimings: settings.markerTimings == .accurate)
-        }
         publish()
     }
 

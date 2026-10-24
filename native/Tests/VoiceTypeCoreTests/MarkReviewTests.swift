@@ -178,7 +178,8 @@ struct MarkTimingPreparationTests {
 
         /// One click, then key-up, waiting for the capture worker.
         func clickAndRelease(wordTimings: Bool = true) -> DictationMarks? {
-            marking.begin(audioOrigin: 0, wordTimings: wordTimings)
+            marking.begin(wordTimings: wordTimings)
+            marking.microphoneStarted(audioOrigin: 0)
             _ = drawing.handleMouse(.down, 1, 1)
             _ = drawing.handleMouse(.up, 1, 1)
             let marks = marking.finish()

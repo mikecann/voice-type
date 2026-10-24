@@ -7,10 +7,11 @@ import Foundation
 /// REC is red with live bars, "..." is orange with a slow sweep while Whisper runs. A paste
 /// that landed turns the pill green with "N words" and a tick that draws itself in 0.12 s,
 /// holds 0.22 s and fades over 0.14 s. A paste that didn't land says "On your clipboard.
-/// ⌘V to paste" for 1.6 s and goes without a fade. A paste that landed when macOS wouldn't
-/// let the old clipboard be read says so once, for 4 s, and marks drawn without Screen
-/// Recording say "No screenshots" for 1.6 s. Reduce Motion skips the tick animation and the
-/// fade.
+/// ⌘V to paste" for 1.6 s and goes without a fade, or, when focus wasn't on a text box, what
+/// had it and what to do, for 3 s so there's time to read it. A paste that landed when
+/// macOS wouldn't let the old clipboard be read says so once, for 4 s, and marks drawn
+/// without Screen Recording say "No screenshots" for 1.6 s. Reduce Motion skips the tick
+/// animation and the fade.
 public enum PillState: String, Sendable {
     case rec
     case processing
@@ -78,6 +79,8 @@ public final class PillController {
     public static let barMaxHeight = 20.0
     public static let doneHoldSeconds = 0.22
     public static let failureHoldSeconds = 1.6
+    /// The focus miss says more than "On your clipboard", so it stays up longer.
+    public static let focusMissHoldSeconds = 3.0
     public static let clipboardNoticeHoldSeconds = 4.0
     public static let fadeSeconds = 0.14
     public static let tickDrawSeconds = 0.12
@@ -122,7 +125,14 @@ public final class PillController {
     /// Marks were drawn without Screen Recording, so the words went in alone.
     public func showScreenRecordingHint() { show(.hint, "Allow Voice Type Native under Screen Recording in System Settings") }
 
-    public func showPasteFailed() { show(.pasteFailed, "On your clipboard. \u{2318}V to paste") }
+    /// With `miss`, says what had focus instead of a text box, in the log's words.
+    public func showPasteFailed(_ miss: FocusMiss? = nil) {
+        if let miss {
+            show(.pasteFailed, miss.pillMessage, hold: Self.focusMissHoldSeconds)
+        } else {
+            show(.pasteFailed, "On your clipboard. \u{2318}V to paste")
+        }
+    }
 
     public func showClipboardNotKept() { show(.clipboardNotKept, "Allow Paste from other apps to keep your clipboard") }
 
@@ -133,7 +143,7 @@ public final class PillController {
         state = nil
     }
 
-    private func show(_ newState: PillState, _ text: String) {
+    private func show(_ newState: PillState, _ text: String, hold holdOverride: Double? = nil) {
         cancelFeedback()
         surface.setAlpha(1)
         state = newState
@@ -147,7 +157,7 @@ public final class PillController {
         surface.present(PillAppearance(state: newState, text: text), repositionOnly: isVisible)
         isVisible = true
         if feedback {
-            let hold = newState == .done ? Self.doneHoldSeconds : newState == .clipboardNotKept ? Self.clipboardNoticeHoldSeconds : Self.failureHoldSeconds
+            let hold = holdOverride ?? (newState == .done ? Self.doneHoldSeconds : newState == .clipboardNotKept ? Self.clipboardNoticeHoldSeconds : Self.failureHoldSeconds)
             feedbackTimer = scheduler.schedule(after: hold) { [weak self] in self?.startFeedbackFade() }
         }
     }

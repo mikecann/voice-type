@@ -128,6 +128,15 @@ struct DictationControllerDictationTests {
         #expect(h.recordingEntries().first?["status"] == .string("completed"))
     }
 
+    @Test func aPasteThatMissedTheTextBoxSaysWhatHadFocus() throws {
+        let h = try ControllerHarness()
+        h.startAndBecomeReady()
+        h.paster.landed = false
+        h.paster.focusMiss = FocusMiss(app: "T3 Code", role: "AXButton")
+        h.dictate(ControllerHarness.speech(seconds: 1))
+        #expect(h.pill.last == "paste_failed:AXButton")
+    }
+
     @Test func aPasteErrorHidesThePillAndRecordsIt() throws {
         let h = try ControllerHarness()
         h.startAndBecomeReady()

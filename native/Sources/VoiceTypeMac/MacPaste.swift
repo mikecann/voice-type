@@ -138,6 +138,21 @@ final class MacPasteEnvironment: PasteEnvironment, @unchecked Sendable {
 
     func frontmostPID() -> Int32? { NSWorkspace.shared.frontmostApplication?.processIdentifier }
 
+    func frontmostApp() -> TargetApp? {
+        NSWorkspace.shared.frontmostApplication.map { TargetApp(pid: $0.processIdentifier, name: $0.localizedName ?? "unknown") }
+    }
+
+    /// The paste waits on the finalise lane, never here, so the main thread is free to
+    /// answer unless something else is holding it, which would also stop the lazy item
+    /// from being handed over.
+    func mainThreadLatency(timeout: Double) -> Double? {
+        let answered = DispatchSemaphore(value: 0)
+        let started = DispatchTime.now()
+        DispatchQueue.main.async { answered.signal() }
+        guard answered.wait(timeout: started + timeout) == .success else { return nil }
+        return Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1e9
+    }
+
     func focus(inApp pid: Int32?) -> FocusReading {
         guard let pid else { return FocusReading(.unknown) }
         let app = AXUIElementCreateApplication(pid)

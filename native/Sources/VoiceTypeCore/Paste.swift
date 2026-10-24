@@ -106,6 +106,98 @@ public struct FocusReading: Equatable, Sendable {
         guard let role, !role.isEmpty else { return .unknown }
         return editableRoles.contains(role) || valueSettable ? .editable : .notEditable
     }
+
+    /// What a person would call the thing with this role, for telling them why a paste
+    /// missed. It only has to get across "not a text box", so near enough is fine.
+    public static func plainName(_ role: String) -> String {
+        switch role {
+        case "AXButton", "AXPopUpButton", "AXMenuButton", "AXDisclosureTriangle": return "a button"
+        case "AXLink": return "a link"
+        // Chromium and WebKit give a tab (role="tab") the radio button role.
+        case "AXRadioButton", "AXTab", "AXTabGroup": return "a tab"
+        case "AXMenuItem", "AXMenu", "AXMenuBar", "AXMenuBarItem": return "a menu"
+        case "AXCheckBox": return "a checkbox"
+        case "AXList", "AXOutline", "AXTable", "AXRow", "AXCell": return "a list"
+        case "AXWebArea": return "the page"
+        case "AXWindow", "AXSheet": return "the window"
+        default: return "something else"
+        }
+    }
+}
+
+/// A paste that didn't land because keyboard focus was on something that takes no text (a
+/// button, a link, a tab), said in words a person can act on. The log and the pill say the
+/// same thing, the pill more briefly.
+public struct FocusMiss: Equatable, Sendable {
+    /// The app Cmd+V went to, if known.
+    public var app: String?
+    public var role: String
+    /// What was left on the clipboard: "text" or "screenshot".
+    public var item: String
+
+    public init(app: String?, role: String, item: String = "text") {
+        self.app = app
+        self.role = role
+        self.item = item
+    }
+
+    public var message: String {
+        "\(app ?? "The app") didn't take the paste: the focus was on \(FocusReading.plainName(role)) (\(role)), not a text box. The \(item) is on the clipboard: click the text box and press Cmd+V."
+    }
+
+    /// Fits the pill's two lines.
+    public var pillMessage: String { "Focus was on \(FocusReading.plainName(role)). Click the text box, then \u{2318}V" }
+}
+
+/// What was going on when the target never read the clipboard, so the log can tell a focus
+/// problem from a slow app or a stuck main thread.
+public struct ReadTimeout: Equatable, Sendable {
+    /// From Cmd+V to giving up.
+    public var waited: Double
+    /// The app that was in front at key-down, and the one in front now.
+    public var target: TargetApp?
+    public var frontmost: TargetApp?
+    public var focus: FocusReading
+    /// How long the main thread took to answer a ping, nil if it didn't in time. The lazy
+    /// item is only handed over on the main thread's run loop, so a blocked main thread
+    /// looks just like an app that never asked.
+    public var mainThread: Double?
+    /// The clipboard still holds what was offered. If not, something else was copied over it.
+    public var clipboardUnchanged: Bool
+    /// The target read it after all, while these were being checked.
+    public var readLate: Bool
+
+    public init(waited: Double, target: TargetApp?, frontmost: TargetApp?, focus: FocusReading, mainThread: Double?,
+                clipboardUnchanged: Bool, readLate: Bool = false) {
+        self.waited = waited
+        self.target = target
+        self.frontmost = frontmost
+        self.focus = focus
+        self.mainThread = mainThread
+        self.clipboardUnchanged = clipboardUnchanged
+        self.readLate = readLate
+    }
+
+    private static func describe(_ app: TargetApp?) -> String {
+        app.map { "\(pythonRepr($0.name)) pid \($0.pid)" } ?? "unknown"
+    }
+
+    /// The middle of the timeout's log line.
+    public var details: String {
+        let ping = mainThread.map { String(format: "main thread answered in %.0f ms", $0 * 1000) }
+            ?? String(format: "main thread didn't answer within %.1fs", Paster.mainThreadPing)
+        return String(format: "gave up %.2fs after Cmd+V", waited)
+            + "; target \(Self.describe(target)), frontmost \(Self.describe(frontmost))"
+            + "; focus \(focus.role ?? "unknown") (\(focus.kind.rawValue)); \(ping)"
+            + "; clipboard \(clipboardUnchanged ? "unchanged since the offer" : "changed since the offer")"
+            + (readLate ? "; read late, during these checks" : "")
+    }
+
+    /// Set when the focus says why: it wasn't on a text box.
+    public func focusMiss(item: String) -> FocusMiss? {
+        guard focus.kind == .notEditable, let role = focus.role else { return nil }
+        return FocusMiss(app: frontmost?.name ?? target?.name, role: role, item: item)
+    }
 }
 
 /// The app that was in front at key-down.
@@ -123,9 +215,13 @@ public struct TargetApp: Equatable, Sendable {
 public protocol PasteEnvironment: AnyObject {
     func postCommandV()
     func frontmostPID() -> Int32?
+    /// The app in front now, with its name, for the log.
+    func frontmostApp() -> TargetApp?
     /// What has keyboard focus in app `pid`. Each Accessibility call has a 0.25 s limit, so
     /// a busy app can't stall pasting.
     func focus(inApp pid: Int32?) -> FocusReading
+    /// Seconds the main thread took to run a no-op, nil if it didn't within `timeout`.
+    func mainThreadLatency(timeout: Double) -> Double?
     /// Brings `app` to the front. False if it couldn't.
     func activate(_ app: TargetApp) -> Bool
     func playFailureSound()
@@ -144,6 +240,8 @@ public struct PasteOutcome: Equatable, Sendable {
     /// Whether the old clipboard could be read. Anything but complete means it wasn't put
     /// back, and the dictated text was left there instead.
     public var clipboard: PasteboardSnapshot.Readability = .complete
+    /// The paste didn't land and focus wasn't on a text box, so the pill can say what to do.
+    public var focusMiss: FocusMiss?
 }
 
 public final class Paster: @unchecked Sendable {
@@ -152,6 +250,8 @@ public final class Paster: @unchecked Sendable {
     public static let focusPoll = 0.025
     public static let refocusSettle = 0.15
     public static let providerHandOver = 0.05
+    /// How long a read that timed out waits for the main thread to answer.
+    public static let mainThreadPing = 0.5
 
     private let pasteboard: Pasteboard
     private let environment: PasteEnvironment
@@ -189,19 +289,26 @@ public final class Paster: @unchecked Sendable {
         if refocused { sleep(Self.refocusSettle) }
         var role: String?
         var readability = PasteboardSnapshot.Readability.complete
-        let (latency, landed) = try pasteViaPasteboard(text, readability: &readability) {
+        var timeout: ReadTimeout?
+        let (latency, landed) = try pasteViaPasteboard(text, target: target, readability: &readability, timeout: &timeout) {
             let (hasTextBox, focusRole) = self.waitForTextBox(pid: self.environment.frontmostPID())
             role = focusRole
             return hasTextBox
         }
-        let outcome = PasteOutcome(landed: landed, readLatency: latency, focusRole: role, refocused: refocused, clipboard: readability)
+        var outcome = PasteOutcome(landed: landed, readLatency: latency, focusRole: role, refocused: refocused, clipboard: readability)
         if !landed {
             environment.playFailureSound()
-            if latency == nil {
-                log(String(format: "Paste not confirmed: target never read the clipboard within %.1fs. Text left on the clipboard (%d chars).", readTimeout, text.count))
+            if let timeout {
+                outcome.focusRole = timeout.focus.role
+                outcome.focusMiss = timeout.focusMiss(item: "text")
+                log(String(format: "Paste not confirmed: target never read the clipboard within %.1fs (%@). Text left on the clipboard (%d chars).",
+                           readTimeout, timeout.details, text.count))
             } else {
+                // waitForTextBox only gives up on a role it could read, so there is one.
+                if let role { outcome.focusMiss = FocusMiss(app: environment.frontmostApp()?.name ?? target?.name, role: role) }
                 log("Paste went nowhere: the target read the clipboard but no text box had focus (\(role ?? "None")). Text left on the clipboard (\(text.count) chars).")
             }
+            if let miss = outcome.focusMiss { log(miss.message) }
         } else {
             log(String(format: "NSPasteboard+Cmd+V: %d chars injected (target read clipboard after %.0fms, focus %@%@)",
                        text.count, (latency ?? 0) * 1000, role ?? "unknown", refocused ? ", refocused target" : ""))
@@ -218,8 +325,10 @@ public final class Paster: @unchecked Sendable {
     }
 
     /// Returns the seconds the target took to read the text (nil if it never did) and
-    /// whether the paste landed. If it didn't, the text is left on the clipboard.
-    func pasteViaPasteboard(_ text: String, readability: inout PasteboardSnapshot.Readability, landed: () -> Bool) throws -> (Double?, Bool) {
+    /// whether the paste landed. If it didn't, the text is left on the clipboard, and if it
+    /// was never read, `timeout` says what was going on.
+    func pasteViaPasteboard(_ text: String, target: TargetApp?, readability: inout PasteboardSnapshot.Readability, timeout: inout ReadTimeout?,
+                            landed: () -> Bool) throws -> (Double?, Bool) {
         let snapshotStarted = now()
         // Read before anything on the clipboard changes, so a refused read is known in time.
         let saved = pasteboard.snapshot()
@@ -243,6 +352,7 @@ public final class Paster: @unchecked Sendable {
         let started = now()
         environment.postCommandV()
         guard read.wait(timeout: .now() + readTimeout) == .success else {
+            timeout = diagnoseTimeout(read, target: target, offered: offered, since: started)
             leaveOnClipboard(text, offered: offered)
             return (nil, false)
         }
@@ -263,6 +373,23 @@ public final class Paster: @unchecked Sendable {
     private func leaveOnClipboard(_ text: String, offered: Int) {
         // Leave anything copied since the paste alone.
         if pasteboard.changeCount == offered { pasteboard.placeText(text) }
+    }
+
+    /// The target never read the item offered as `offered`: looks at what might explain it,
+    /// before the item is swapped for a plain copy. Only looks, never pastes again: a slow
+    /// read followed by a second Cmd+V would paste twice. Takes up to a second (two bounded
+    /// Accessibility calls and the ping), which only a failed paste pays.
+    func diagnoseTimeout(_ read: DispatchSemaphore, target: TargetApp?, offered: Int, since started: Double) -> ReadTimeout {
+        let waited = now() - started
+        let unchanged = pasteboard.changeCount == offered
+        // The app in front now is the one Cmd+V went to, whichever one was meant to get it.
+        let frontmost = environment.frontmostApp()
+        let focus = environment.focus(inApp: frontmost?.pid)
+        let mainThread = environment.mainThreadLatency(timeout: Self.mainThreadPing)
+        // A read during the checks means the target was slow rather than never asking.
+        let late = read.wait(timeout: .now()) == .success
+        return ReadTimeout(waited: waited, target: target, frontmost: frontmost, focus: focus, mainThread: mainThread,
+                           clipboardUnchanged: unchanged, readLate: late)
     }
 
     // MARK: Text plus screenshots
@@ -300,11 +427,14 @@ public final class Paster: @unchecked Sendable {
         public var focusRole: String?
         public var refocused: Bool
         public var clipboard: PasteboardSnapshot.Readability
+        /// The sequence stopped because focus wasn't on a text box, so the pill can say what to do.
+        public var focusMiss: FocusMiss? = nil
     }
 
     private enum Item {
         case text(String), png(Data)
         var isText: Bool { if case .text = self { return true } else { return false } }
+        var noun: String { isText ? "text" : "screenshot" }
     }
 
     private func pasteSequenceLocked(text: String, images: [Data], into target: TargetApp?) throws -> SequenceOutcome {
@@ -313,6 +443,10 @@ public final class Paster: @unchecked Sendable {
         let hasText = !PythonText.strip(text).isEmpty
         let items: [Item] = (hasText ? [.text(text)] : []) + images.map { .png($0) }
         var role: String?
+        // Only the text gets a focus check, so a sequence of screenshots, or one that stopped
+        // before its check, says so rather than "unknown", which means Accessibility couldn't tell.
+        var focusChecked = false
+        var focusText: String { focusChecked ? role ?? "unknown" : "not checked" }
         var outcome = SequenceOutcome(pasted: 0, total: items.count, landed: true, focusRole: nil, refocused: refocused, clipboard: .complete)
         guard !items.isEmpty else { return outcome }
 
@@ -321,9 +455,10 @@ public final class Paster: @unchecked Sendable {
         if saved.readability != .complete {
             log("The clipboard couldn't be read in full (\(saved.readability.rawValue)), so it won't be put back after this paste; the dictated text stays on it.")
         }
-        func stop(at pasted: Int) -> SequenceOutcome {
+        func stop(at pasted: Int, _ why: String) -> SequenceOutcome {
             environment.playFailureSound()
-            log("Paste with screenshots stopped after \(pasted) of \(items.count) item(s) (focus \(role ?? "unknown")). The next item is left on the clipboard.")
+            log("Paste with screenshots stopped after \(pasted) of \(items.count) item(s) (\(why)). The next item is left on the clipboard.")
+            if let miss = outcome.focusMiss { log(miss.message) }
             outcome.pasted = pasted
             outcome.landed = false
             outcome.focusRole = role
@@ -335,7 +470,7 @@ public final class Paster: @unchecked Sendable {
                 sleep(Self.imageGap)
                 // Something else was copied mid-sequence. It's the user's clipboard now: stop
                 // without touching it or putting the old one back over it.
-                if pasteboard.changeCount != offered { return stop(at: index) }
+                if pasteboard.changeCount != offered { return stop(at: index, "something else was copied, focus \(focusText)") }
             }
             let read = DispatchSemaphore(value: 0)
             let accepted: Bool
@@ -345,19 +480,27 @@ public final class Paster: @unchecked Sendable {
             }
             guard accepted else { throw PasteError() }
             offered = pasteboard.changeCount
+            let started = now()
             environment.postCommandV()
             guard read.wait(timeout: .now() + readTimeout) == .success else {
+                let timeout = diagnoseTimeout(read, target: target, offered: offered, since: started)
+                role = timeout.focus.role
+                focusChecked = true
+                outcome.focusMiss = timeout.focusMiss(item: item.noun)
                 leave(item, offered: offered)
-                return stop(at: index)
+                return stop(at: index, String(format: "the target never read the %@ within %.1fs: %@", item.noun, readTimeout, timeout.details))
             }
             // The provider hands the data over when its callback returns.
             sleep(Self.providerHandOver)
             if index == 0 && item.isText {
                 let (hasTextBox, focusRole) = waitForTextBox(pid: environment.frontmostPID())
                 role = focusRole
+                focusChecked = true
                 if !hasTextBox {
+                    // waitForTextBox only gives up on a role it could read, so there is one.
+                    if let focusRole { outcome.focusMiss = FocusMiss(app: environment.frontmostApp()?.name ?? target?.name, role: focusRole) }
                     leave(item, offered: offered)
-                    return stop(at: 1)
+                    return stop(at: 1, "focus \(focusText)")
                 }
             }
         }
@@ -376,7 +519,7 @@ public final class Paster: @unchecked Sendable {
         }
         outcome.pasted = items.count
         outcome.focusRole = role
-        log("NSPasteboard+Cmd+V: \(text.count) chars and \(images.count) screenshot(s) injected (focus \(role ?? "unknown")\(refocused ? ", refocused target" : ""))")
+        log("NSPasteboard+Cmd+V: \(text.count) chars and \(images.count) screenshot(s) injected (focus \(focusText)\(refocused ? ", refocused target" : ""))")
         return outcome
     }
 

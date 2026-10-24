@@ -89,8 +89,12 @@ final class FakeStreamFactory: AudioStreamFactory, @unchecked Sendable {
     private(set) var streams: [FakeStream] = []
     var failOpen = false
     var failNextStart = false
+    /// Runs while a stream opens, before failOpen throws: the user clicking while the
+    /// microphone is still opening.
+    var whileOpening: () -> Void = {}
 
     func open(_ device: InputDevice, onAudio: @escaping @Sendable ([Float]) -> Void, onError: @escaping @Sendable (String) -> Void) throws -> AudioInputStream {
+        whileOpening()
         if failOpen { throw MicrophoneUnavailable("open failed") }
         let stream = FakeStream(name: "s\(streams.count + 1):\(device.name)", log: { [unowned self] in self.events.append($0) })
         stream.onAudio = onAudio
@@ -242,7 +246,7 @@ final class FakePill: PillPresenting, @unchecked Sendable {
     func showProcessing(_ preview: String) { calls.append("processing:\(preview)") }
     func showDone(words: Int) { calls.append("done:\(words)") }
     func showDone(words: Int, shots: Int) { calls.append("done:\(words)+\(shots)") }
-    func showPasteFailed() { calls.append("paste_failed") }
+    func showPasteFailed(_ miss: FocusMiss?) { calls.append(miss.map { "paste_failed:\($0.role)" } ?? "paste_failed") }
     func showScreenRecordingHint() { calls.append("hint") }
     func showClipboardNotKept() { calls.append("clipboard_not_kept") }
     func hide() { calls.append("hide") }
@@ -252,6 +256,8 @@ final class FakePaster: Pasting, @unchecked Sendable {
     var landed = true
     var throwError = false
     var clipboard = PasteboardSnapshot.Readability.complete
+    /// What a paste that didn't land says had focus.
+    var focusMiss: FocusMiss?
     var duringPaste: () -> Void = {}
     private(set) var pasted: [(text: String, target: TargetApp?)] = []
     private(set) var sequences: [(text: String, images: [Data])] = []
@@ -260,7 +266,8 @@ final class FakePaster: Pasting, @unchecked Sendable {
         duringPaste()
         if throwError { throw PasteError() }
         pasted.append((text, target))
-        return PasteOutcome(landed: landed, readLatency: landed ? 0.01 : nil, focusRole: "AXTextArea", refocused: false, clipboard: clipboard)
+        return PasteOutcome(landed: landed, readLatency: landed ? 0.01 : nil, focusRole: "AXTextArea", refocused: false, clipboard: clipboard,
+                            focusMiss: landed ? nil : focusMiss)
     }
 
     func pasteSequence(text: String, images: [Data], into target: TargetApp?) throws -> Paster.SequenceOutcome {
@@ -268,7 +275,8 @@ final class FakePaster: Pasting, @unchecked Sendable {
         if throwError { throw PasteError() }
         sequences.append((text, images))
         let total = (PythonText.strip(text).isEmpty ? 0 : 1) + images.count
-        return Paster.SequenceOutcome(pasted: landed ? total : 0, total: total, landed: landed, focusRole: "AXTextArea", refocused: false, clipboard: clipboard)
+        return Paster.SequenceOutcome(pasted: landed ? total : 0, total: total, landed: landed, focusRole: "AXTextArea", refocused: false, clipboard: clipboard,
+                                      focusMiss: landed ? nil : focusMiss)
     }
 }
 

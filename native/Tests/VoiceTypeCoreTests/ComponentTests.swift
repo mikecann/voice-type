@@ -334,16 +334,30 @@ final class FakePasteboard: Pasteboard {
 final class FakePasteEnvironment: PasteEnvironment {
     var onCommandV: () -> Void = {}
     var front: Int32? = 42
+    /// Names for the pids that come to the front.
+    var names: [Int32: String] = [42: "T3 Code", 7: "Finder"]
     var focusReadings: [FocusReading] = [FocusReading(.editable, role: "AXTextArea")]
     var activations: [TargetApp] = []
     var sounds = 0
     var focusCalls = 0
+    var focusPIDs: [Int32?] = []
+    /// What the main thread ping answers: seconds, or nil for a main thread that's stuck.
+    var mainThreadAnswer: Double? = 0.002
+    var pings = 0
+    var duringFocus: () -> Void = {}
 
     func postCommandV() { onCommandV() }
     func frontmostPID() -> Int32? { front }
+    func frontmostApp() -> TargetApp? { front.map { TargetApp(pid: $0, name: names[$0] ?? "unknown") } }
     func focus(inApp pid: Int32?) -> FocusReading {
         focusCalls += 1
+        focusPIDs.append(pid)
+        duringFocus()
         return focusReadings.count > 1 ? focusReadings.removeFirst() : focusReadings[0]
+    }
+    func mainThreadLatency(timeout: Double) -> Double? {
+        pings += 1
+        return mainThreadAnswer
     }
     func activate(_ app: TargetApp) -> Bool {
         activations.append(app)
@@ -386,7 +400,9 @@ struct PasterTests {
         let outcome = try paster(board, env).paste("dictated words", into: nil)
         #expect(!outcome.landed)
         #expect(outcome.readLatency == nil)
-        #expect(env.focusCalls == 0)
+        // Looked once, to say why, and never waited for a text box.
+        #expect(env.focusCalls == 1)
+        #expect(outcome.focusMiss == nil)
         #expect(board.texts == ["dictated words"])
         #expect(env.sounds == 1)
     }
@@ -399,8 +415,81 @@ struct PasterTests {
         let outcome = try paster(board, env).paste("dictated words", into: nil)
         #expect(!outcome.landed)
         #expect(outcome.focusRole == "AXWebArea")
+        #expect(outcome.focusMiss == FocusMiss(app: "T3 Code", role: "AXWebArea"))
         #expect(board.texts == ["dictated words"])
         #expect(env.focusCalls > 1)
+        // It was read, so it isn't a timeout and the main thread isn't pinged.
+        #expect(env.pings == 0)
+    }
+
+    final class Logs: @unchecked Sendable { var lines: [String] = [] }
+
+    func loggingPaster(_ board: FakePasteboard, _ env: FakePasteEnvironment, _ logs: Logs, clock: ManualExecutor = ManualExecutor()) -> Paster {
+        Paster(pasteboard: board, environment: env, now: { clock.now }, sleep: { clock.sleep($0) }, log: { logs.lines.append($0) }, readTimeout: 0.05)
+    }
+
+    @Test func aReadThatNeverComesIsLoggedWithWhatHadFocusAndSaysWhatToDo() throws {
+        let board = FakePasteboard(old)
+        let env = FakePasteEnvironment()
+        let clock = ManualExecutor()
+        // The real wait is the semaphore's; on the paste's clock, Cmd+V to giving up is 2 s.
+        env.onCommandV = { clock.sleep(2) }
+        env.focusReadings = [FocusReading(.notEditable, role: "AXButton")]
+        env.mainThreadAnswer = 0.003
+        let logs = Logs()
+        let outcome = try loggingPaster(board, env, logs, clock: clock).paste("dictated words", into: TargetApp(pid: 42, name: "T3 Code"))
+        #expect(!outcome.landed && outcome.readLatency == nil)
+        #expect(outcome.focusRole == "AXButton")
+        #expect(outcome.focusMiss == FocusMiss(app: "T3 Code", role: "AXButton", item: "text"))
+        // Focus was read once, in the app in front, and the main thread was pinged once.
+        #expect(env.focusPIDs == [42])
+        #expect(env.pings == 1)
+        let line = try #require(logs.lines.first { $0.hasPrefix("Paste not confirmed") })
+        #expect(line.contains("(gave up 2.00s after Cmd+V; target 'T3 Code' pid 42, frontmost 'T3 Code' pid 42; focus AXButton (not-editable); main thread answered in 3 ms; clipboard unchanged since the offer). Text left on the clipboard (14 chars)."))
+        #expect(logs.lines.last == "T3 Code didn't take the paste: the focus was on a button (AXButton), not a text box. The text is on the clipboard: click the text box and press Cmd+V.")
+        #expect(board.texts == ["dictated words"])
+        #expect(env.sounds == 1)
+    }
+
+    @Test func aStuckMainThreadAndAnotherAppInFrontShowInTheTimeoutLine() throws {
+        let board = FakePasteboard(old)
+        let env = FakePasteEnvironment()
+        env.onCommandV = { [unowned env] in
+            env.front = 7
+            board.copyNewer("copied meanwhile")
+        }
+        env.mainThreadAnswer = nil
+        let logs = Logs()
+        let outcome = try loggingPaster(board, env, logs).paste("dictated words", into: TargetApp(pid: 42, name: "T3 Code"))
+        #expect(!outcome.landed)
+        // A text box had focus, so focus isn't the reason and there's no advice about it.
+        #expect(outcome.focusMiss == nil)
+        #expect(env.focusPIDs == [7])
+        let line = try #require(logs.lines.first { $0.hasPrefix("Paste not confirmed") })
+        #expect(line.contains("target 'T3 Code' pid 42, frontmost 'Finder' pid 7; focus AXTextArea (editable); main thread didn't answer within 0.5s; clipboard changed since the offer)"))
+        #expect(!logs.lines.contains { $0.contains("didn't take the paste") })
+        // What was copied meanwhile is left alone.
+        #expect(board.texts == ["copied meanwhile"])
+    }
+
+    @Test func aReadDuringTheChecksIsLoggedAsLate() throws {
+        let board = FakePasteboard(old)
+        let env = FakePasteEnvironment()
+        env.duringFocus = { board.read() }
+        let logs = Logs()
+        let outcome = try loggingPaster(board, env, logs).paste("dictated words", into: nil)
+        // Still a failure: no second Cmd+V, and the text stays on the clipboard.
+        #expect(!outcome.landed)
+        #expect(logs.lines.contains { $0.hasPrefix("Paste not confirmed") && $0.contains("target unknown, frontmost 'T3 Code' pid 42") && $0.contains("; read late, during these checks)") })
+        #expect(board.texts == ["dictated words"])
+    }
+
+    @Test func saysWhatHadFocusInPlainWords() {
+        #expect(FocusMiss(app: "T3 Code", role: "AXLink").pillMessage == "Focus was on a link. Click the text box, then \u{2318}V")
+        #expect(FocusMiss(app: nil, role: "AXRadioButton", item: "screenshot").message
+            == "The app didn't take the paste: the focus was on a tab (AXRadioButton), not a text box. The screenshot is on the clipboard: click the text box and press Cmd+V.")
+        #expect(FocusReading.plainName("AXMenuItem") == "a menu")
+        #expect(FocusReading.plainName("AXSplitter") == "something else")
     }
 
     @Test func neverRestoresOverSomethingCopiedAfterThePaste() throws {
@@ -654,6 +743,18 @@ struct PillTests {
         clock.advance(1.59)
         #expect(pill.isVisible)
         clock.advance(0.02)
+        #expect(!pill.isVisible)
+    }
+
+    @Test func aFocusMissSaysWhatHadFocusAndHoldsLongEnoughToRead() {
+        let (pill, surface, clock) = make()
+        pill.showPasteFailed(FocusMiss(app: "T3 Code", role: "AXButton"))
+        #expect(surface.presented.last?.label == " Clipboard")
+        #expect(surface.presented.last?.preview == "Focus was on a button. Click the text box, then \u{2318}V")
+        #expect(surface.presented.last?.color == .orange)
+        clock.advance(2.9)
+        #expect(pill.isVisible)
+        clock.advance(0.2)
         #expect(!pill.isVisible)
     }
 

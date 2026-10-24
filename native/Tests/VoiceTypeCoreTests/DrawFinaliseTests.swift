@@ -163,6 +163,9 @@ struct DrawFinaliseTests {
         let outcome = f.finish(f.marks())
         #expect(outcome.landed == false)
         #expect(f.h.pill.calls.last == "paste_failed")
+        f.h.paster.focusMiss = FocusMiss(app: "T3 Code", role: "AXLink", item: "screenshot")
+        f.finish(f.marks())
+        #expect(f.h.pill.calls.last == "paste_failed:AXLink")
     }
 
     @Test func aShortQuietClipWithMarksPastesTheScreenshots() throws {
@@ -201,16 +204,23 @@ struct DrawFinaliseTests {
 }
 
 final class FakeMarkSessions: MarkSessions, @unchecked Sendable {
-    var begun: [Double] = []
+    var begun = 0
+    var audioOrigins: [Double] = []
     var wordTimings: [Bool] = []
+    var abandoned = 0
     var finished = 0
     var cleanedUp = 0
     var toHandOver: DictationMarks?
+    /// Called at begin, to see what the microphone had done by then.
+    var onBegin: () -> Void = {}
 
-    func begin(audioOrigin: Double, wordTimings: Bool) {
-        begun.append(audioOrigin)
+    func begin(wordTimings: Bool) {
+        begun += 1
         self.wordTimings.append(wordTimings)
+        onBegin()
     }
+    func microphoneStarted(audioOrigin: Double) { audioOrigins.append(audioOrigin) }
+    func abandon() { abandoned += 1 }
     func finish() -> DictationMarks? {
         finished += 1
         return toHandOver
@@ -221,14 +231,83 @@ final class FakeMarkSessions: MarkSessions, @unchecked Sendable {
     }
 }
 
+/// The controller with the real drawing session, ScreenMarking and capture worker behind a
+/// fake mouse tap and a fake screenshot, to see the tap go on and off around the microphone.
+final class DrawingControllerRig: @unchecked Sendable {
+    final class Clock: @unchecked Sendable { var executor: ManualExecutor? }
+
+    let h: ControllerHarness
+    let drawing: DrawingSession
+    let worker = DispatchQueue(label: "test.mark-capture")
+    let directory: URL
+    var keyDown = false
+    /// Each switch of the mouse tap, with how many times the microphone had started by then.
+    private(set) var tapSwitches: [(on: Bool, micStarts: Int)] = []
+    private let markLogBox = FinaliseHarness.LogBox()
+    /// What ScreenMarking logged.
+    var markLogs: [String] { markLogBox.lines }
+
+    init(settings: JSONValue = .object([("audio_recording_enabled", .bool(true))])) throws {
+        directory = try temporaryDirectory("drawing-controller")
+        let store = ScreenshotStore(directory: directory.appendingPathComponent("screenshots"))
+        // Marks are timed on the controller's clock, as in the app.
+        let clock = Clock()
+        drawing = DrawingSession(tracker: InkTracker(clock: { clock.executor?.now ?? 0 }))
+        let capturer = MarkCapturer(store: store, log: { _ in }, capture: { _ in
+            (Data("raw".utf8), CaptureTarget(rect: MarkRect(0, 0, 10, 10), args: [], description: "test"))
+        }, composite: { raw, _, _ in raw }, worker: worker)
+        let markLogBox = self.markLogBox
+        h = try ControllerHarness(settings: settings, marks: ScreenMarking(drawing: drawing, capturer: capturer, store: store,
+                                                                          log: { markLogBox.lines.append($0) }))
+        clock.executor = h.executor
+        drawing.attach(setTap: { [unowned self] on in self.tapSwitches.append((on, self.micStarts)) },
+                       isKeyDown: { [unowned self] in self.keyDown }, armWatchdog: {})
+    }
+
+    deinit { try? FileManager.default.removeItem(at: directory) }
+
+    var micStarts: Int { h.factory.events.filter { $0.hasPrefix("start") }.count }
+
+    /// As the keyboard tap does it: the key state first, then the controller.
+    func press() {
+        keyDown = true
+        h.press()
+    }
+
+    func release() {
+        keyDown = false
+        drawing.keyReleased()
+        h.release()
+    }
+
+    /// A click where the mark would go. True if the tap swallowed both halves.
+    func click() -> Bool {
+        let down = drawing.handleMouse(.down, 5, 5)
+        let up = drawing.handleMouse(.up, 5, 5)
+        return down && up
+    }
+
+    /// The screenshots on disk once the capture worker is done.
+    var savedShots: [String] {
+        worker.sync {}
+        let dir = directory.appendingPathComponent("screenshots").path
+        return ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).filter { $0.hasSuffix(".png") }
+    }
+}
+
 struct ControllerDrawingTests {
-    @Test func drawingStartsAfterTheMicrophoneAndEndsAtKeyUp() throws {
+    @Test func drawingStartsBeforeTheMicrophoneAndEndsAtKeyUp() throws {
         let marks = FakeMarkSessions()
         let h = try ControllerHarness(marks: marks)
+        var startsAtBegin: Int?
+        marks.onBegin = { [unowned h] in startsAtBegin = h.factory.events.filter { $0.hasPrefix("start") }.count }
         h.startAndBecomeReady()
         h.press()
+        #expect(startsAtBegin == 0)
         #expect(h.factory.events.last == "start s1:Yeti Stereo Microphone")
-        #expect(marks.begun == [h.executor.now])
+        #expect(marks.begun == 1)
+        #expect(marks.audioOrigins == [h.executor.now])
+        #expect(marks.abandoned == 0)
         h.factory.deliver(ControllerHarness.speech(seconds: 1))
         h.executor.drain()
         #expect(marks.finished == 0)
@@ -265,7 +344,139 @@ struct ControllerDrawingTests {
         let h = try ControllerHarness(settings: .object([("draw_on_screen_enabled", .bool(false))]), marks: marks)
         h.startAndBecomeReady()
         h.dictate(ControllerHarness.speech(seconds: 1))
-        #expect(marks.begun.isEmpty)
+        #expect(marks.begun == 0)
+        // Nor does a failed start touch drawing.
+        h.factory.failOpen = true
+        h.recorder.invalidate()
+        h.press()
+        h.release()
+        #expect(marks.begun == 0 && marks.abandoned == 0)
+    }
+
+    @Test func drawingOffInSettingsNeverTurnsTheMouseTapOn() throws {
+        let rig = try DrawingControllerRig(settings: .object([("draw_on_screen_enabled", .bool(false))]))
+        rig.h.startAndBecomeReady()
+        rig.press()
+        #expect(!rig.click())
+        rig.release()
+        #expect(rig.tapSwitches.isEmpty)
+    }
+
+    @Test func aKeyDownThatCannotDictateNeverStartsDrawing() throws {
+        let marks = FakeMarkSessions()
+        let h = try ControllerHarness(marks: marks)
+        // Still loading the model: the press only explains why nothing records.
+        h.transcriber.loadResult = nil
+        h.startAndBecomeReady()
+        h.press()
+        h.release()
+        #expect(h.phase == .starting)
+        h.transcriber.completeLoad()
+        h.executor.drain()
+        #expect(h.phase == .idle)
+        // Paused from the menu.
+        h.controller.setEnabled(false)
+        h.press()
+        h.release()
+        #expect(marks.begun == 0 && marks.abandoned == 0)
+    }
+
+    @Test func aMicrophoneThatCannotStartAbandonsTheDrawing() throws {
+        let marks = FakeMarkSessions()
+        let h = try ControllerHarness(marks: marks)
+        h.startAndBecomeReady()
+        h.factory.failOpen = true
+        h.recorder.invalidate()
+        h.press()
+        #expect(marks.begun == 1 && marks.abandoned == 1)
+        #expect(marks.audioOrigins.isEmpty)
+        h.release()
+        #expect(marks.finished == 0)
+        // A start that hangs in Core Audio restarts the process, and abandons it too.
+        h.factory.failOpen = false
+        h.coreAudioHangs = true
+        h.press()
+        #expect(marks.begun == 2 && marks.abandoned == 2)
+        #expect(h.restarts == ["microphone stream could not open; relaunching the Core Audio backend"])
+    }
+
+    @Test func theMouseTapGoesOnAtKeyDownBeforeTheMicrophone() throws {
+        let rig = try DrawingControllerRig()
+        rig.h.startAndBecomeReady()
+        rig.press()
+        #expect(rig.tapSwitches.map(\.on) == [true])
+        #expect(rig.tapSwitches.first?.micStarts == 0)
+        #expect(rig.micStarts == 1)
+        rig.h.factory.deliver(ControllerHarness.speech(seconds: 1))
+        rig.h.executor.drain()
+        rig.release()
+        #expect(rig.tapSwitches.map(\.on) == [true, false])
+    }
+
+    @Test func aClickWhileTheMicrophoneOpensIsAMarkNotAClickOnTheApp() throws {
+        let rig = try DrawingControllerRig()
+        rig.h.startAndBecomeReady()
+        // As after a device change: key-down has to open the stream, which takes a while.
+        rig.h.recorder.invalidate()
+        var swallowed: Bool?
+        rig.h.factory.whileOpening = { [unowned rig] in
+            rig.h.executor.sleep(0.35)
+            swallowed = rig.click()
+        }
+        rig.press()
+        rig.h.factory.whileOpening = {}
+        #expect(swallowed == true)
+        #expect(rig.h.logs.contains("Mic stream was not prepared; opened it on key-down."))
+        #expect(rig.h.logs.contains("Slow microphone start: 350 ms from key-down to recording (the stream had to be opened first)."))
+        rig.h.factory.deliver(ControllerHarness.speech(seconds: 1))
+        rig.h.executor.drain()
+        rig.release()
+        let sequence = try #require(rig.h.paster.sequences.first)
+        #expect(sequence.images == [Data("raw".utf8)])
+        // Drawn before the first sample, so its marker goes before the first word.
+        #expect(sequence.text.hasPrefix("[1] "))
+        #expect(rig.savedShots.count == 1)
+    }
+
+    @Test func aMicrophoneThatCannotStartTakesTheTapOffAndLeavesNothingBehind() throws {
+        let rig = try DrawingControllerRig()
+        rig.h.startAndBecomeReady()
+        rig.h.factory.failOpen = true
+        rig.h.recorder.invalidate()
+        var swallowed: Bool?
+        // Only the key-down's open: reconnecting afterwards opens the stream again.
+        rig.h.factory.whileOpening = { [unowned rig] in if swallowed == nil { swallowed = rig.click() } }
+        rig.press()
+        #expect(swallowed == true)
+        #expect(rig.tapSwitches.map(\.on) == [true, false])
+        #expect(!rig.drawing.tracker.needsTap)
+        // No ink left on screen, and the screenshot the click had already got is deleted.
+        let ink = rig.drawing.tracker.snapshot()
+        #expect(ink.strokes.isEmpty && ink.current == nil)
+        #expect(rig.savedShots.isEmpty)
+        #expect(rig.markLogs.contains("Dropped 1 screen mark(s): the microphone didn't start, so there's no dictation to paste them into."))
+        // The rest of the hold's clicks reach the app.
+        #expect(!rig.click())
+        rig.release()
+        #expect(rig.h.paster.sequences.isEmpty && rig.h.paster.pasted.isEmpty)
+        #expect(rig.h.logs.contains("--- Key UP ignored: recording never started ---"))
+        // The next dictation draws as normal.
+        rig.h.factory.failOpen = false
+        rig.h.factory.whileOpening = {}
+        rig.h.recorder.prepare()
+        rig.press()
+        #expect(rig.click())
+        rig.h.factory.deliver(ControllerHarness.speech(seconds: 1))
+        rig.h.executor.drain()
+        rig.release()
+        #expect(rig.h.paster.sequences.count == 1)
+    }
+
+    @Test func aMicrophoneThatStartsQuicklyIsNotCalledSlow() throws {
+        let h = try ControllerHarness()
+        h.startAndBecomeReady()
+        h.dictate(ControllerHarness.speech(seconds: 1))
+        #expect(!h.logs.contains { $0.hasPrefix("Slow microphone start") })
     }
 }
 
@@ -298,7 +509,8 @@ struct ScreenMarkingTests {
 
     @Test func aDictationsMarksAreCapturedAndHandedOver() throws {
         let rig = try Rig()
-        rig.marking.begin(audioOrigin: 100, wordTimings: true)
+        rig.marking.begin(wordTimings: true)
+        rig.marking.microphoneStarted(audioOrigin: 100)
         _ = rig.drawing.handleMouse(.down, 1, 1)
         rig.clock.now = 100.5
         _ = rig.drawing.handleMouse(.up, 1, 1)
@@ -313,20 +525,23 @@ struct ScreenMarkingTests {
 
     @Test func nothingDrawnMeansNoMarks() throws {
         let rig = try Rig()
-        rig.marking.begin(audioOrigin: 0, wordTimings: true)
+        rig.marking.begin(wordTimings: true)
+        rig.marking.microphoneStarted(audioOrigin: 0)
         #expect(rig.marking.finish() == nil)
     }
 
     @Test func withoutAMouseTapNothingStarts() throws {
         let rig = try Rig(tap: false)
-        rig.marking.begin(audioOrigin: 0, wordTimings: true)
+        rig.marking.begin(wordTimings: true)
+        rig.marking.microphoneStarted(audioOrigin: 0)
         #expect(rig.marking.finish() == nil)
     }
 
     @Test func aKeyAlreadyUpStartsNothing() throws {
         let rig = try Rig()
         rig.keyDown = false
-        rig.marking.begin(audioOrigin: 0, wordTimings: true)
+        rig.marking.begin(wordTimings: true)
+        rig.marking.microphoneStarted(audioOrigin: 0)
         #expect(!rig.drawing.tracker.isActive)
         #expect(rig.marking.finish() == nil)
     }

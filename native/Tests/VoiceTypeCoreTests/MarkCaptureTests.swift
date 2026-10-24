@@ -210,6 +210,29 @@ struct MarkCapturerTests {
         #expect(h.logs.contains { $0.contains("capture failed") })
     }
 
+    @Test func anAbandonedSessionDeletesWhatItCapturedAndCapturesNoMore() {
+        let release = DispatchSemaphore(value: 0)
+        h.holdCapture = (2, release)
+        let capturer = h.capturer()
+        capturer.begin()
+        let strokes = [1, 2, 3].map { arrow((0, 0), (100, 0), $0) }
+        for stroke in strokes { capturer.submit(stroke) }
+        let deadline = Date(timeIntervalSinceNow: 2)
+        while h.store.saved.isEmpty && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+        // Mark 1 is saved, mark 2 is still being captured and mark 3 is queued behind it.
+        capturer.abandon()
+        release.signal()
+        while h.store.discarded.count < 2 && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+        Thread.sleep(forTimeInterval: 0.05)
+        #expect(h.store.saved.map(\.number) == [1, 2])
+        #expect(Set(h.store.discarded) == ["/shots/1.png", "/shots/2.png"])
+        // Nothing is left to hand over, and later marks go nowhere.
+        capturer.submit(arrow((0, 0), (100, 0), 4))
+        #expect(capturer.finish([]) == nil)
+        Thread.sleep(forTimeInterval: 0.05)
+        #expect(h.store.saved.count == 2)
+    }
+
     @Test func noSessionMeansNothingIsQueued() {
         let capturer = h.capturer()
         capturer.submit(arrow((0, 0), (100, 0)))

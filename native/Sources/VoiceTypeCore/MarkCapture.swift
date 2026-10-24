@@ -73,6 +73,8 @@ public final class CaptureSession: @unchecked Sendable {
     /// Set once finalisation has taken the paths, so a late recomposite doesn't delete a file
     /// that's about to be pasted.
     private var collected = false
+    /// The dictation never started: capture nothing more for it.
+    private var abandoned_ = false
     /// Only the worker touches this.
     var groups: [CaptureTarget.GroupKey: Group] = [:]
 
@@ -123,6 +125,14 @@ public final class CaptureSession: @unchecked Sendable {
     }
 
     func notePermissionMissing() { condition.withLock { permissionMissing_ = true } }
+
+    var isAbandoned: Bool { condition.withLock { abandoned_ } }
+
+    func abandon() { condition.withLock { abandoned_ = true } }
+
+    /// Every file a mark points at now. Older captures of a window were deleted when it was
+    /// captured again.
+    var capturedPaths: [String] { condition.withLock { Array(Set(paths.values.compactMap { $0 })) } }
 
     /// Records a capture for these marks. Returns whether finalisation already took the paths.
     func record(_ path: String, for numbers: [Int]) -> Bool {
@@ -205,6 +215,20 @@ public final class MarkCapturer: @unchecked Sendable {
         return session
     }
 
+    /// Closes the session of a dictation whose microphone never started and deletes what it
+    /// captured. The deleting is queued on the worker, behind any capture already under way
+    /// for it, and captures queued after that skip themselves, so no file is left behind.
+    public func abandon() {
+        guard let session = lock.withLock({ () -> CaptureSession? in
+            defer { self.session = nil }
+            return self.session
+        }) else { return }
+        session.abandon()
+        worker.async { [store] in
+            for path in session.capturedPaths { store.discard(path) }
+        }
+    }
+
     private func permissionOK(_ session: CaptureSession) -> Bool {
         if allowed() { return true }
         session.notePermissionMissing()
@@ -217,6 +241,8 @@ public final class MarkCapturer: @unchecked Sendable {
     }
 
     private func work(_ session: CaptureSession, _ stroke: Stroke) {
+        // Queued by the tap thread just before its dictation was abandoned.
+        if session.isAbandoned { return }
         if permissionOK(session) {
             do {
                 try captureInto(session, stroke)

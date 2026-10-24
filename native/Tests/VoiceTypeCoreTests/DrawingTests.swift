@@ -298,9 +298,11 @@ struct PasteSequenceTests {
     let clock = ManualExecutor()
     let png1 = Data("png one".utf8)
     let png2 = Data("png two".utf8)
+    let logs = PasterTests.Logs()
 
     func paster() -> Paster {
-        Paster(pasteboard: board, environment: env, now: { [clock] in clock.now }, sleep: { [clock] in clock.sleep($0) }, log: { _ in }, readTimeout: 0.05)
+        Paster(pasteboard: board, environment: env, now: { [clock] in clock.now }, sleep: { [clock] in clock.sleep($0) },
+               log: { [logs] in logs.lines.append($0) }, readTimeout: 0.05)
     }
 
     final class Reads: @unchecked Sendable { var items: [[(type: String, data: Data)]] = [] }
@@ -374,6 +376,43 @@ struct PasteSequenceTests {
         #expect(calls == 2)
         #expect(board.items.map { $0.map(\.type) } == [["public.png"]])
         #expect(board.items.first?.first?.data == png1)
+    }
+
+    @Test func aScreenshotThatIsNeverReadSaysWhatHadFocusThen() throws {
+        var calls = 0
+        let reads = Reads()
+        let read = targetReads(reads)
+        env.onCommandV = {
+            calls += 1
+            if calls == 1 { read() }
+        }
+        // A text box for the text; by the screenshot's Cmd+V a click had moved focus to a button.
+        env.focusReadings = [FocusReading(.editable, role: "AXTextArea"), FocusReading(.notEditable, role: "AXButton")]
+        let outcome = try paster().pasteSequence(text: "words", images: [png1, png2], into: TargetApp(pid: 42, name: "T3 Code"))
+        #expect(!outcome.landed && outcome.pasted == 1)
+        #expect(outcome.focusRole == "AXButton")
+        #expect(outcome.focusMiss == FocusMiss(app: "T3 Code", role: "AXButton", item: "screenshot"))
+        let line = try #require(logs.lines.first { $0.hasPrefix("Paste with screenshots stopped") })
+        #expect(line.hasPrefix("Paste with screenshots stopped after 1 of 3 item(s) (the target never read the screenshot within 0.1s: gave up "))
+        #expect(line.contains("; target 'T3 Code' pid 42, frontmost 'T3 Code' pid 42; focus AXButton (not-editable); main thread answered in 2 ms; clipboard unchanged since the offer)"))
+        #expect(logs.lines.last == "T3 Code didn't take the paste: the focus was on a button (AXButton), not a text box. The screenshot is on the clipboard: click the text box and press Cmd+V.")
+    }
+
+    @Test func screenshotsAloneSayTheirFocusWasNotChecked() throws {
+        let reads = Reads()
+        let read = targetReads(reads)
+        env.onCommandV = read
+        _ = try paster().pasteSequence(text: "", images: [png1], into: nil)
+        #expect(logs.lines.last == "NSPasteboard+Cmd+V: 0 chars and 1 screenshot(s) injected (focus not checked)")
+        // A copy part way through stops them before any check too.
+        env.onCommandV = { [board] in
+            read()
+            board.copyNewer("user copy")
+        }
+        let outcome = try paster().pasteSequence(text: "", images: [png1, png2], into: nil)
+        #expect(!outcome.landed)
+        #expect(logs.lines.last == "Paste with screenshots stopped after 1 of 2 item(s) (something else was copied, focus not checked). The next item is left on the clipboard.")
+        #expect(outcome.focusMiss == nil)
     }
 
     @Test func aDeniedClipboardKeepsTheTextRatherThanWipingIt() throws {

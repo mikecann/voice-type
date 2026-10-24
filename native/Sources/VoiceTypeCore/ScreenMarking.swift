@@ -1,12 +1,19 @@
 import Foundation
 
-/// Drawing while dictating, as the controller sees it: start when a recording starts, hand
-/// the marks over at key-up. Called on the controller's queue only.
+/// Drawing while dictating, as the controller sees it: start at key-down, hand the marks
+/// over at key-up, or throw them away if the microphone never started. Called on the
+/// controller's queue only.
 public protocol MarkSessions: AnyObject, Sendable {
-    /// The microphone has just started for a recording. Starts drawing if the key is still
-    /// down. `audioOrigin` is when the first sample was captured, on the controller's clock.
-    /// `wordTimings` gets the word timing context loading once a mark has been captured.
-    func begin(audioOrigin: Double, wordTimings: Bool)
+    /// Key-down, once the dictation's gates have passed and before the microphone opens:
+    /// starts drawing if the key is still down. `wordTimings` gets the word timing context
+    /// loading once a mark has been captured.
+    func begin(wordTimings: Bool)
+    /// The microphone is running. `audioOrigin` is when the first sample was captured, on the
+    /// controller's clock; a mark finished before it goes before the first word.
+    func microphoneStarted(audioOrigin: Double)
+    /// The microphone couldn't start, so there's no dictation: stops drawing and throws away
+    /// whatever was drawn, its ink and any screenshot already taken.
+    func abandon()
     /// Key-up: stops drawing and returns what was drawn, or nil if nothing was.
     func finish() -> DictationMarks?
     /// Deletes screenshots past their week. Returns how many.
@@ -40,7 +47,7 @@ public final class ScreenMarking: MarkSessions, @unchecked Sendable {
         drawing.tracker.setOnStroke { [capturer] stroke in capturer.submit(stroke) }
     }
 
-    public func begin(audioOrigin: Double, wordTimings: Bool) {
+    public func begin(wordTimings: Bool) {
         guard drawing.isAvailable else { return }
         session = capturer.begin(onCapture: wordTimings ? onMark : nil)
         guard drawing.begin() else {
@@ -49,8 +56,23 @@ public final class ScreenMarking: MarkSessions, @unchecked Sendable {
             session = nil
             return
         }
-        self.audioOrigin = audioOrigin
         onBegin()
+    }
+
+    public func microphoneStarted(audioOrigin: Double) {
+        guard session != nil else { return }
+        self.audioOrigin = audioOrigin
+    }
+
+    public func abandon() {
+        guard session != nil else { return }
+        session = nil
+        // The capture session goes first, so a mark the end below finishes is never captured.
+        capturer.abandon()
+        // Lets the mouse go (bar a mouse-up the app is still owed, which the tap keeps
+        // swallowing) and takes the strokes, which takes their ink off the screen.
+        let strokes = drawing.end()
+        if !strokes.isEmpty { log("Dropped \(strokes.count) screen mark(s): the microphone didn't start, so there's no dictation to paste them into.") }
     }
 
     public func finish() -> DictationMarks? {
