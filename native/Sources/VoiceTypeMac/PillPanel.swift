@@ -183,6 +183,8 @@ final class MainThreadPill: PillPresenting, @unchecked Sendable {
     func showRecording(_ preview: String) { onMain { $0.showRecording(preview) } }
     func showProcessing(_ preview: String) { onMain { $0.showProcessing(preview) } }
     func showDone(words: Int) { onMain { $0.showDone(words: words) } }
+    func showDone(words: Int, shots: Int) { onMain { $0.showDone(words: words, shots: shots) } }
+    func showScreenRecordingHint() { onMain { $0.showScreenRecordingHint() } }
     func showPasteFailed() { onMain { $0.showPasteFailed() } }
     func showClipboardNotKept() { onMain { $0.showClipboardNotKept() } }
     func hide() { onMain { $0.hide() } }

@@ -286,18 +286,45 @@ final class FakePasteboard: Pasteboard {
     func placeText(_ text: String) {
         changeCount += 1
         lazyText = nil
+        lazyData = nil
         items = [[("public.utf8-plain-text", Data(text.utf8))]]
+    }
+
+    var lazyData: (data: Data, type: String)?
+
+    func offerLazily(data: Data, type: String, onRead: @escaping @Sendable () -> Void) -> Bool {
+        guard !refuse else { return false }
+        changeCount += 1
+        items = []
+        lazyText = nil
+        lazyData = (data, type)
+        self.onRead = onRead
+        return true
+    }
+
+    func placeData(_ data: Data, type: String) {
+        changeCount += 1
+        lazyText = nil
+        lazyData = nil
+        items = [[(type, data)]]
     }
 
     /// The target app reading the lazy item.
     func read() {
-        guard let lazyText else { return }
-        items = [[("public.utf8-plain-text", Data(lazyText.utf8))]]
+        if let lazyText {
+            items = [[("public.utf8-plain-text", Data(lazyText.utf8))]]
+        } else if let lazyData {
+            items = [[(lazyData.type, lazyData.data)]]
+        } else {
+            return
+        }
         onRead?()
     }
 
     func copyNewer(_ text: String) {
         changeCount += 1
+        lazyText = nil
+        lazyData = nil
         items = [[("public.utf8-plain-text", Data(text.utf8))]]
     }
 
@@ -678,7 +705,13 @@ struct WatchdogTests {
         let watchdog = OperationWatchdog(name: "t", timeout: 0.05) { count.increment() }
         watchdog.start()
         watchdog.start()
-        try await Task.sleep(nanoseconds: 200_000_000)
+        // Waits for the timer rather than a fixed time: on a heavily loaded Mac (load
+        // average over 300) a 0.05 s timer once took more than 0.2 s to fire.
+        let deadline = Date(timeIntervalSinceNow: 30)
+        while count.value == 0 && Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        #expect(count.value == 1)
+        // Then long enough for a second timer from the second start() to have fired too.
+        try await Task.sleep(nanoseconds: 300_000_000)
         watchdog.complete()
         #expect(count.value == 1)
     }
@@ -686,6 +719,19 @@ struct WatchdogTests {
     @Test func theFinalisationDeadlineScalesWithLength() {
         #expect(Deadlines.finalisation(durationSec: 2) == 30)
         #expect(Deadlines.finalisation(durationSec: 60) == 120)
+        #expect(Deadlines.finalisation(durationSec: 2, marks: 0) == 30)
+    }
+
+    @Test func screenMarksAddTheirOwnWaitsToTheFinalisationDeadline() {
+        // A 3 s clip with ten marks: the screenshots (4 s + 1 s a mark), the timing pass
+        // (4.3 s), and ten pastes of up to 0.35 + 2 + 0.05 s, plus the last gap.
+        let budget = Deadlines.finalisation(durationSec: 3, marks: 10)
+        #expect(abs(budget - (30 + 14 + 4.3 + 10 * 2.4 + 0.35)) < 1e-9)
+        // Each part is bounded on its own, so the sum always fits inside the deadline.
+        let worst = DictationMarks.captureWait + 10 * DictationMarks.captureWaitPerMark + Deadlines.wordTiming(durationSec: 3)
+            + 10 * (Paster.imageGap + Paster.readTimeout + Paster.providerHandOver) + Paster.imageGap
+        #expect(budget >= 30 + worst)
+        #expect(Deadlines.finalisation(durationSec: 60, marks: 1) > Deadlines.finalisation(durationSec: 60))
     }
 
     @Test func boundedWorkTimesOutWithoutWaiting() {
@@ -1296,5 +1342,271 @@ struct InferenceWorkerTests {
     final class ResultBox: @unchecked Sendable {
         var value: Transcript?
         var called = false
+    }
+}
+
+struct WordTimingWorkerTests {
+    final class TimingEngine: DictationEngine, @unchecked Sendable {
+        let lock = NSLock()
+        var calls: [TranscribeOptions] = []
+        func transcribe(_ samples: [Float], options: TranscribeOptions) throws -> Transcript {
+            try transcribe(samples, options: options, abort: nil)
+        }
+        func transcribe(_ samples: [Float], options: TranscribeOptions, abort: AbortFlag?) throws -> Transcript {
+            lock.withLock { calls.append(options) }
+            return Transcript(segments: [TranscriptSegment(text: " timed", startSec: 0, endSec: 1, noSpeechProb: 0, tokenProbs: [],
+                                                           words: [TimedText(0.2, 0.6, " timed")])])
+        }
+        func promptTokens(for prompt: String?) -> [Int32] { prompt == nil ? [] : [7, 8] }
+    }
+
+    final class Loads: @unchecked Sendable {
+        let lock = NSLock()
+        var count = 0
+        var logs: [String] = []
+    }
+
+    func worker(_ timing: TimingEngine?, loads: Loads, fail: Bool = false, idle: Double = 300) -> InferenceWorker {
+        let main = TimingEngine()
+        let worker = InferenceWorker(makeEngine: { main }, makeTimingEngine: timing.map { engine in
+            {
+                loads.lock.withLock { loads.count += 1 }
+                if fail { throw MicrophoneUnavailable("no DTW for you") }
+                return engine
+            }
+        }, timingIdleSeconds: idle, log: { line in loads.lock.withLock { loads.logs.append(line) } })
+        let loaded = DispatchSemaphore(value: 0)
+        worker.load { _ in loaded.signal() }
+        loaded.wait()
+        return worker
+    }
+
+    @Test func aMarkLoadsTheTimingEngineOnceAndKeyUpUsesIt() {
+        let timing = TimingEngine(), loads = Loads()
+        let worker = worker(timing, loads: loads)
+        #expect(!worker.timingEngineLoaded)
+        worker.prepareWordTimings()
+        worker.prepareWordTimings()
+        #expect(worker.timingEngineLoaded)
+        let transcript = worker.startWordTimings([0, 0, 0], promptTokens: [7, 8], timeout: 5).wait()
+        #expect(transcript?.segments.first?.words == [TimedText(0.2, 0.6, " timed")])
+        #expect(loads.count == 1)
+        // Word timings asked for, with the final pass's word list tokens.
+        #expect(timing.calls.map(\.wordTimings) == [true])
+        #expect(timing.calls.map(\.promptTokens) == [[7, 8]])
+    }
+
+    @Test func withoutATimingEngineThereAreNoTimings() {
+        let worker = worker(nil, loads: Loads())
+        worker.prepareWordTimings()
+        #expect(worker.startWordTimings([0], promptTokens: [], timeout: 5).wait() == nil)
+    }
+
+    @Test func aTimingEngineThatWontLoadIsTriedOnce() {
+        let loads = Loads()
+        let worker = worker(TimingEngine(), loads: loads, fail: true)
+        #expect(worker.startWordTimings([0], promptTokens: [], timeout: 5).wait() == nil)
+        #expect(worker.startWordTimings([0], promptTokens: [], timeout: 5).wait() == nil)
+        #expect(loads.count == 1)
+        #expect(loads.logs.contains { $0.hasPrefix("The word timing model failed to load") })
+    }
+
+    @Test func theTimingEngineIsFreedWhenIdle() {
+        let loads = Loads()
+        let worker = worker(TimingEngine(), loads: loads, idle: 0.05)
+        _ = worker.startWordTimings([0], promptTokens: [], timeout: 5).wait()
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while worker.timingEngineLoaded && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+        #expect(!worker.timingEngineLoaded)
+        // And it comes back for the next dictation with marks.
+        #expect(worker.startWordTimings([0], promptTokens: [], timeout: 5).wait() != nil)
+        #expect(loads.count == 2)
+    }
+
+    final class Timers: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pending: [@Sendable () -> Void] = []
+        func add(_ fire: @escaping @Sendable () -> Void) { lock.withLock { pending.append(fire) } }
+        var count: Int { lock.withLock { pending.count } }
+        func fire(_ index: Int) { lock.withLock { pending[index] }() }
+    }
+
+    @Test func eachMarkRestartsTheIdleCountdown() {
+        // Loaded by one dictation's pass, then a mark in the next: the countdown runs from
+        // the mark, so the context can't be freed between it and key-up.
+        let loads = Loads(), timers = Timers()
+        let worker = InferenceWorker(makeEngine: { TimingEngine() }, makeTimingEngine: {
+            loads.lock.withLock { loads.count += 1 }
+            return TimingEngine()
+        }, idleTimer: { _, fire in timers.add(fire) })
+        let loaded = DispatchSemaphore(value: 0)
+        worker.load { _ in loaded.signal() }
+        loaded.wait()
+        _ = worker.startWordTimings([0], promptTokens: [], timeout: 5).wait()
+        // A barrier: the timing thread has finished the pass and set its countdown.
+        _ = worker.timingEngineLoaded
+        let fromPass = timers.count
+        worker.prepareWordTimings()
+        #expect(worker.timingEngineLoaded)
+        #expect(timers.count == fromPass + 1)
+        // The countdowns from before the mark run out: still loaded.
+        for i in 0..<fromPass { timers.fire(i) }
+        #expect(worker.timingEngineLoaded)
+        // The mark's runs out: freed.
+        timers.fire(fromPass)
+        #expect(!worker.timingEngineLoaded)
+        #expect(loads.count == 1)
+    }
+
+    @Test func aWakeDropsTheTimingEngineAndTheNextMarkLoadsAFreshOne() {
+        let loads = Loads()
+        let worker = worker(TimingEngine(), loads: loads)
+        worker.prepareWordTimings()
+        #expect(worker.timingEngineLoaded)
+        worker.dropWordTimings(reason: "wake")
+        #expect(!worker.timingEngineLoaded)
+        #expect(loads.logs.contains("Word timing model unloaded (wake); the next mark loads it again."))
+        worker.prepareWordTimings()
+        #expect(worker.timingEngineLoaded)
+        #expect(loads.count == 2)
+    }
+
+    @Test func aWakeBeforeAnyMarkStartsNothing() {
+        let loads = Loads()
+        let worker = worker(TimingEngine(), loads: loads)
+        worker.dropWordTimings(reason: "wake")
+        #expect(!worker.timingEngineLoaded)
+        #expect(loads.count == 0)
+    }
+
+    /// A timing engine whose passes block until the test lets them go, like one stuck in
+    /// Metal after a wake.
+    final class StuckEngine: DictationEngine, @unchecked Sendable {
+        let release = DispatchSemaphore(value: 0)
+        func transcribe(_ samples: [Float], options: TranscribeOptions) throws -> Transcript {
+            try transcribe(samples, options: options, abort: nil)
+        }
+        func transcribe(_ samples: [Float], options: TranscribeOptions, abort: AbortFlag?) throws -> Transcript {
+            // Doesn't look at `abort`: a real hang wouldn't either.
+            release.wait()
+            return Transcript(segments: [])
+        }
+        func promptTokens(for prompt: String?) -> [Int32] { [] }
+    }
+
+    @Test func aHungTimingPassRunsOutOfTimeAndLaterPassesDontQueueBehindIt() {
+        let stuck = StuckEngine(), loads = Loads()
+        let worker = InferenceWorker(makeEngine: { TimingEngine() }, makeTimingEngine: { stuck },
+                                     log: { line in loads.lock.withLock { loads.logs.append(line) } })
+        let loaded = DispatchSemaphore(value: 0)
+        worker.load { _ in loaded.signal() }
+        loaded.wait()
+        let started = Date()
+        let pass = worker.startWordTimings([0], promptTokens: [], timeout: 0.2)
+        #expect(pass.wait() == nil)
+        #expect(pass.timedOut)
+        #expect(pass.abort.isSet)
+        #expect(Date().timeIntervalSince(started) < 10)
+        #expect(worker.timingPassStuck)
+        // The next dictation gets token timestamps at once instead of waiting again.
+        let next = Date()
+        #expect(worker.startWordTimings([0], promptTokens: [], timeout: 5).wait() == nil)
+        #expect(Date().timeIntervalSince(next) < 1)
+        #expect(loads.logs.contains("The last word timing pass is still running; placing markers with the final pass's token timestamps."))
+        // The main engine is untouched: a final pass still runs straight away.
+        let final = try? worker.run { engine, _ in try engine.transcribe([1], options: TranscribeOptions()) }
+        #expect(final?.text == "timed")
+        // Once the stuck pass comes back, timing passes work again.
+        stuck.release.signal()
+        let deadline = Date(timeIntervalSinceNow: 10)
+        while worker.timingPassStuck && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+        #expect(!worker.timingPassStuck)
+        let again = worker.startWordTimings([0], promptTokens: [], timeout: 10)
+        stuck.release.signal()
+        #expect(again.wait() != nil)
+    }
+
+    @Test func aSlowTimingLoadNeverHoldsUpTheFinalPass() {
+        // The timing context loads on its own thread: a final pass doesn't queue behind it.
+        let gate = DispatchSemaphore(value: 0), loading = DispatchSemaphore(value: 0)
+        let worker = InferenceWorker(makeEngine: { TimingEngine() }, makeTimingEngine: {
+            loading.signal()
+            gate.wait()
+            return TimingEngine()
+        })
+        let loaded = DispatchSemaphore(value: 0)
+        worker.load { _ in loaded.signal() }
+        loaded.wait()
+        worker.prepareWordTimings()
+        loading.wait()
+        let started = Date()
+        let final = try? worker.run { engine, _ in try engine.transcribe([1], options: TranscribeOptions()) }
+        #expect(final?.text == "timed")
+        #expect(Date().timeIntervalSince(started) < 5)
+        // A pass that times out waiting for the load gives nil, and the load carries on.
+        #expect(worker.startWordTimings([0], promptTokens: [], timeout: 0.1).wait() == nil)
+        gate.signal()
+        #expect(worker.timingEngineLoaded)
+    }
+
+    @Test func theTimingThreadWaitsForAFinalPassToFinish() {
+        // So the two never share the GPU at key-up.
+        let order = Order()
+        let inFinal = DispatchSemaphore(value: 0), finishFinal = DispatchSemaphore(value: 0)
+        let worker = InferenceWorker(makeEngine: { TimingEngine() }, makeTimingEngine: {
+            order.add("timing load")
+            return TimingEngine()
+        })
+        let loaded = DispatchSemaphore(value: 0)
+        worker.load { _ in loaded.signal() }
+        loaded.wait()
+        let finalDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            _ = try? worker.run { _, _ in
+                inFinal.signal()
+                finishFinal.wait()
+                order.add("final")
+            }
+            finalDone.signal()
+        }
+        inFinal.wait()
+        worker.prepareWordTimings()
+        Thread.sleep(forTimeInterval: 0.1)
+        finishFinal.signal()
+        finalDone.wait()
+        #expect(worker.timingEngineLoaded)
+        #expect(order.items == ["final", "timing load"])
+    }
+
+    final class Order: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items_: [String] = []
+        func add(_ item: String) { lock.withLock { items_.append(item) } }
+        var items: [String] { lock.withLock { items_ } }
+    }
+
+    @Test func aPassThatIsNotNeededIsDroppedBeforeItRuns() {
+        let timing = TimingEngine(), loads = Loads()
+        let worker = worker(timing, loads: loads)
+        let inFinal = DispatchSemaphore(value: 0), gate = DispatchSemaphore(value: 0), finalDone = DispatchSemaphore(value: 0)
+        // A final pass holds the timing thread back, so the pass is still queued when it's
+        // cancelled (every capture failed).
+        DispatchQueue.global().async {
+            _ = try? worker.run { _, _ in
+                inFinal.signal()
+                gate.wait()
+            }
+            finalDone.signal()
+        }
+        inFinal.wait()
+        let pass = worker.startWordTimings([0], promptTokens: [], timeout: 5)
+        pass.cancel()
+        gate.signal()
+        finalDone.wait()
+        #expect(pass.wait() == nil)
+        // Neither loaded nor run.
+        #expect(!worker.timingEngineLoaded)
+        #expect(loads.count == 0)
+        #expect(timing.lock.withLock { timing.calls.isEmpty })
     }
 }

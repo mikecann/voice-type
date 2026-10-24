@@ -56,6 +56,16 @@ public struct SettingsFile: Sendable {
 
     public func native(_ key: String) -> JSONValue? { json[Self.nativeKey]?[key] }
 
+    /// How screen marks' "[n]" markers are timed: `"native": {"marker_timings": "rough"}`
+    /// uses the final pass's own token timestamps and never loads the second, 1 GB timing
+    /// context; anything else means "accurate", the DTW timing pass.
+    public enum MarkerTimings: String, Sendable { case accurate, rough }
+
+    public var markerTimings: MarkerTimings {
+        guard let value = native("marker_timings")?.stringValue else { return .accurate }
+        return MarkerTimings(rawValue: PythonText.strip(value).lowercased()) ?? .accurate
+    }
+
     public mutating func set(_ key: String, _ value: JSONValue) {
         json.set(key, value)
     }

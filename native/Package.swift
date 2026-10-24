@@ -19,10 +19,15 @@ let package = Package(
             checksum: "e57f8c48933000acabc13bb913fbe82805d483a2deff692cc6738836bd92393b"
         ),
 
+        // Pixel work for screen-mark screenshots: ports of Pillow's resize, quantizer and PNG
+        // encoding. Always optimised, even in debug builds, since unoptimised Swift takes
+        // seconds over a Retina window, which the tests would feel.
+        .target(name: "VoiceTypeImaging", swiftSettings: [.unsafeFlags(["-O"])]),
+
         // Everything that decides what gets typed, apart from the model itself: settings,
         // the word list prompt and its tokens, the no-speech gates, the loop guard,
         // corrections and WAV reading. No whisper or AppKit, so it's tested on its own.
-        .target(name: "VoiceTypeCore"),
+        .target(name: "VoiceTypeCore", dependencies: ["VoiceTypeImaging"]),
 
         // The only code that talks to whisper.cpp.
         .target(name: "VoiceTypeWhisper", dependencies: ["VoiceTypeCore", "whisper"]),
@@ -43,7 +48,7 @@ let package = Package(
 
         .testTarget(
             name: "VoiceTypeCoreTests",
-            dependencies: ["VoiceTypeCore"],
+            dependencies: ["VoiceTypeCore", "VoiceTypeImaging"],
             resources: [.copy("Fixtures")]
         ),
         // Needs the real model, so each test skips itself when the model isn't there.

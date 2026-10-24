@@ -61,6 +61,8 @@ public final class DictationController: @unchecked Sendable {
         public var finaliseLane: Executor
         public var readinessLane: Executor
         public var makeWatchdog: (String, Double, @escaping @Sendable () -> Void) -> OperationWatchdog
+        /// Drawing while dictating; nil without a mouse tap (or in tests that don't draw).
+        public var marks: MarkSessions?
 
         public init(recorder: Recorder, transcriber: Transcribing, readiness: MicrophoneReadiness, pill: PillPresenting,
                     finaliser: Finaliser, frontmostApp: @escaping () -> TargetApp?, archive: RecordingArchive,
@@ -68,7 +70,8 @@ public final class DictationController: @unchecked Sendable {
                     restartProcess: @escaping (String) -> Void, publish: @escaping (ControllerSnapshot) -> Void,
                     now: @escaping () -> Double, wallClock: @escaping () -> Date, queue: Executor & Scheduler,
                     finaliseLane: Executor, readinessLane: Executor,
-                    makeWatchdog: @escaping (String, Double, @escaping @Sendable () -> Void) -> OperationWatchdog) {
+                    makeWatchdog: @escaping (String, Double, @escaping @Sendable () -> Void) -> OperationWatchdog,
+                    marks: MarkSessions? = nil) {
             self.recorder = recorder
             self.transcriber = transcriber
             self.readiness = readiness
@@ -86,6 +89,7 @@ public final class DictationController: @unchecked Sendable {
             self.finaliseLane = finaliseLane
             self.readinessLane = readinessLane
             self.makeWatchdog = makeWatchdog
+            self.marks = marks
         }
     }
 
@@ -168,7 +172,7 @@ public final class DictationController: @unchecked Sendable {
 
     /// Loads the model and checks the microphone. Dictation starts once both are ready.
     public func start() {
-        ports.log("Settings: microphone_name='\(settings.microphoneName)'  audio_recording_enabled=\(settings.audioRecordingEnabled ? "True" : "False")  draw_on_screen_enabled=\(settings.drawOnScreenEnabled ? "True" : "False") (drawing comes in phase 2)")
+        ports.log("Settings: microphone_name='\(settings.microphoneName)'  audio_recording_enabled=\(settings.audioRecordingEnabled ? "True" : "False")  draw_on_screen_enabled=\(settings.drawOnScreenEnabled ? "True" : "False")")
         cleanUpRecordings()
         let watchdog = ports.makeWatchdog("model-load", Deadlines.modelLoad) { [ports] in
             ports.restartProcess("Final model load exceeded \(Int(Deadlines.modelLoad))s; restarting with a fresh native backend")
@@ -224,6 +228,9 @@ public final class DictationController: @unchecked Sendable {
         message = MicrophoneReadiness.initialMessage(preferred: preferred)
         if noticeRevealed { ports.pill.showProcessing(message) }
         if reason != "startup" { ports.log("Preparing the microphone again (\(reason)).") }
+        // Only a wake warms up. The main engine's warm-up below proves its Metal context
+        // still works; the word timing one is simply dropped, and the next mark loads it afresh.
+        if warmUp { ports.transcriber.dropWordTimings(reason: reason) }
         // Closing everything means the next stream is opened from a fresh device lookup.
         ports.recorder.close()
         publish()
@@ -397,6 +404,11 @@ public final class DictationController: @unchecked Sendable {
         let gen = generation
         capTimer = ports.queue.schedule(after: Deadlines.maxRecording) { [weak self] in self?.capReached(gen) }
         schedulePreview(gen)
+        // After the microphone is running, so drawing never delays it. The first sample was
+        // captured about when start() returned.
+        if settings.drawOnScreenEnabled {
+            ports.marks?.begin(audioOrigin: downSince + ready, wordTimings: settings.markerTimings == .accurate)
+        }
         publish()
     }
 
@@ -475,6 +487,7 @@ public final class DictationController: @unchecked Sendable {
         guard let active = recording else { return }
         capTimer?.cancel()
         previewTimer?.cancel()
+        let marks = ports.marks?.finish()
         ports.log("--- Key UP ---")
         // One line for the dictation's live preview, rather than one every half second, which
         // filled the log now that native no longer restarts (and rotates it) at every wake.
@@ -504,18 +517,19 @@ public final class DictationController: @unchecked Sendable {
             ("formatter_enabled", .bool(false)),
             ("vocabulary", s.vocabularyForRecording),
         ]
+        if let marks { metadata.append(("mark_count", .int(marks.strokes.count))) }
         metadata.append(("app", .string("native")))
         metadata.append(("engine", .string("whisper.cpp b5454 ggml-large-v3-turbo-q8_0")))
 
         let duration = Double(samples.count) / Double(sampleRate)
-        let timeout = Deadlines.finalisation(durationSec: duration)
+        let timeout = Deadlines.finalisation(durationSec: duration, marks: marks?.strokes.count ?? 0)
         let watchdog = ports.makeWatchdog("finalization", timeout) { [ports] in
             ports.restartProcess(String(format: "Final transcription exceeded %.1fs; restarting with a fresh native backend (automatic retry is disabled to avoid duplicate injection)", timeout))
         }
         finalWatchdog = watchdog
         watchdog.start()
         let job = FinaliseJob(samples: samples, metadata: metadata, preview: PreviewFormat.wrap(lastPreview), target: active.target,
-                              settings: s, keyUpAt: keyUpAt, stopAudioSeconds: stopTook, keyHoldSeconds: keyHold)
+                              settings: s, keyUpAt: keyUpAt, stopAudioSeconds: stopTook, keyHoldSeconds: keyHold, marks: marks)
         let finaliser = ports.finaliser
         ports.finaliseLane.run { [weak self] in
             let outcome = finaliser.run(job)
@@ -692,6 +706,10 @@ public final class DictationController: @unchecked Sendable {
         DispatchQueue.global(qos: .utility).async {
             let removed = ports.archive.cleanup()
             if removed > 0 { ports.log("Deleted \(removed) expired recording archive file(s).") }
+            if let marks = ports.marks {
+                let shots = marks.cleanUp()
+                if shots > 0 { ports.log("Deleted \(shots) expired mark screenshot(s).") }
+            }
         }
     }
 

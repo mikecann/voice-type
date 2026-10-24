@@ -32,6 +32,10 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
     private var controller: DictationController?
     private var recorder: Recorder?
     private var tap: KeyboardTap?
+    /// Drawing while dictating: the ink tracker and the mouse tap's session, shared by the
+    /// keyboard tap (which owns the mouse tap), the controller and the live ink.
+    private lazy var drawing = DrawingSession(tracker: InkTracker(clock: { ProcessInfo.processInfo.systemUptime }))
+    private var ink: InkOverlay?
     private var deviceWatcher: AudioDeviceWatcher?
     private var stallDetector: StallDetector?
     private var timers: [DispatchSourceTimer] = []
@@ -80,7 +84,7 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
             quit: { [weak self] in self?.quit() }
         ), catalog: catalog)
         publish(nil)
-        if Permission.missing.contains(where: { $0 != .pasteFromOtherApps }) { permissionsWindow.show() }
+        if Permission.missing.contains(where: \.isRequired) { permissionsWindow.show() }
         tryLock()
     }
 
@@ -233,7 +237,7 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
         backoff?.cancel()
         setAppState(nil)
         // Made before the controller, which tells it whether to swallow the keys.
-        tap = KeyboardTap { [weak self] down in self?.onController { $0.hotkeyChanged(down: down) } }
+        tap = makeTap()
         buildController()
         onController { $0.start() }
         startTap()
@@ -300,7 +304,18 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
             _ = try engine.transcribe([Float](repeating: 0, count: sampleRate / 2), options: TranscribeOptions())
             log(String(format: "Model loaded in %.0f ms, warmed in %.0f ms.", engine.loadMilliseconds, (uptime() - started) * 1000))
             return engine
-        })
+        }, makeTimingEngine: {
+            // The same model in a second context with DTW alignment, for screen marks'
+            // markers: about 1 GB more, only from the first captured mark until 5 minutes after
+            // the last (or a wake), and never with "marker_timings": "rough".
+            let path = VoiceTypePaths.defaultModel.path
+            log("Loading the word timing model for screen marks (whisper.cpp DTW)...")
+            let engine = try WhisperEngine(modelPath: path, dtw: true)
+            let started = uptime()
+            _ = try engine.transcribe([Float](repeating: 0, count: sampleRate / 2), options: TranscribeOptions(wordTimings: true))
+            log(String(format: "Word timing model loaded in %.0f ms, warmed in %.0f ms.", engine.loadMilliseconds, (uptime() - started) * 1000))
+            return engine
+        }, log: log)
         let pill = MainThreadPill(level: { recorder.level })
         let paster = Paster(pasteboard: GeneralPasteboard(), environment: MacPasteEnvironment(), now: uptime,
                             sleep: { Thread.sleep(forTimeInterval: $0) }, log: log)
@@ -320,7 +335,8 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
             queue: QueueExecutor(controllerQueue),
             finaliseLane: QueueExecutor(DispatchQueue(label: "voice-type.finalise", qos: .userInitiated)),
             readinessLane: QueueExecutor(DispatchQueue(label: "voice-type.readiness", qos: .userInitiated)),
-            makeWatchdog: { name, timeout, fire in OperationWatchdog(name: name, timeout: timeout, onTimeout: fire) }
+            makeWatchdog: { name, timeout, fire in OperationWatchdog(name: name, timeout: timeout, onTimeout: fire) },
+            marks: makeScreenMarking(log: log, onMark: { worker.prepareWordTimings() })
         )
         controller = DictationController(ports: ports)
     }
@@ -338,12 +354,10 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
         // Never without the lock (this also ends a permission retry loop after a hand-over),
         // and never without a controller to take the keys (backing off, or given up).
         guard lock.isHeld, dictationStarted, !exiting.load(ordering: .relaxed) else { return }
-        if tap == nil {
-            tap = KeyboardTap { [weak self] down in self?.onController { $0.hotkeyChanged(down: down) } }
-        }
+        if tap == nil { tap = makeTap() }
         guard let tap, tap.status != .running else { return }
         if tap.start() {
-            log("Keyboard tap installed: hold F12 or Right Control to dictate.")
+            log("Keyboard tap installed: hold F12 or Right Control to dictate\(drawing.isAvailable ? ", and drag or click to draw while holding it" : "").")
             publish(nil)
             return
         }
@@ -353,6 +367,23 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
         }
         publish(nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.startTap() }
+    }
+
+    private func makeTap() -> KeyboardTap {
+        KeyboardTap(drawing: drawing, log: { [logFile] in logFile.log($0) }) { [weak self] down in
+            self?.onController { $0.hotkeyChanged(down: down) }
+        }
+    }
+
+    /// The capture worker, the screenshot store and the live ink, for the controller.
+    private func makeScreenMarking(log: @escaping @Sendable (String) -> Void, onMark: @escaping @Sendable () -> Void) -> ScreenMarking {
+        let store = ScreenshotStore(directory: VoiceTypePaths.dataDirectory.appendingPathComponent("screenshots"))
+        let capturer = MarkCapturer(store: store, log: log, capture: { try MacScreen.capture($0) },
+                                    allowed: { MacScreen.captureAllowed }, request: { MacScreen.requestCapture() })
+        let ink = InkOverlay(tracker: drawing.tracker)
+        self.ink = ink
+        return ScreenMarking(drawing: drawing, capturer: capturer, store: store, log: log,
+                             onBegin: { DispatchQueue.main.async { ink.start() } }, onMark: onMark)
     }
 
     private func observeSystem() {

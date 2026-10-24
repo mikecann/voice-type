@@ -8,8 +8,9 @@ import Foundation
 /// that landed turns the pill green with "N words" and a tick that draws itself in 0.12 s,
 /// holds 0.22 s and fades over 0.14 s. A paste that didn't land says "On your clipboard.
 /// ⌘V to paste" for 1.6 s and goes without a fade. A paste that landed when macOS wouldn't
-/// let the old clipboard be read says so once, for 4 s. Reduce Motion skips the tick
-/// animation and the fade.
+/// let the old clipboard be read says so once, for 4 s, and marks drawn without Screen
+/// Recording say "No screenshots" for 1.6 s. Reduce Motion skips the tick animation and the
+/// fade.
 public enum PillState: String, Sendable {
     case rec
     case processing
@@ -107,6 +108,19 @@ public final class PillController {
     public func showDone(words: Int) {
         show(.done, "\(words) word\(words == 1 ? "" : "s")")
     }
+
+    /// "12 words + 2 shots", or just "2 shots" when nothing was said.
+    public func showDone(words: Int, shots: Int) {
+        var label = "\(words) word\(words == 1 ? "" : "s")"
+        if shots > 0 {
+            let shotLabel = "\(shots) shot\(shots == 1 ? "" : "s")"
+            label = words > 0 ? "\(label) + \(shotLabel)" : shotLabel
+        }
+        show(.done, label)
+    }
+
+    /// Marks were drawn without Screen Recording, so the words went in alone.
+    public func showScreenRecordingHint() { show(.hint, "Allow Voice Type Native under Screen Recording in System Settings") }
 
     public func showPasteFailed() { show(.pasteFailed, "On your clipboard. \u{2318}V to paste") }
 

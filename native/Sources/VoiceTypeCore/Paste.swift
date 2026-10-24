@@ -80,6 +80,10 @@ public protocol Pasteboard: AnyObject {
     func offerLazily(_ text: String, onRead: @escaping @Sendable () -> Void) -> Bool
     /// clearContents, then `text` as a plain string, so a manual Cmd+V (or a late read) works.
     func placeText(_ text: String)
+    /// Like offerLazily(_:onRead:), for bytes of one type (a screenshot's public.png).
+    func offerLazily(data: Data, type: String, onRead: @escaping @Sendable () -> Void) -> Bool
+    /// clearContents, then `data` as `type`.
+    func placeData(_ data: Data, type: String)
 }
 
 public enum FocusKind: String, Sendable {
@@ -259,6 +263,130 @@ public final class Paster: @unchecked Sendable {
     private func leaveOnClipboard(_ text: String, offered: Int) {
         // Leave anything copied since the paste alone.
         if pasteboard.changeCount == offered { pasteboard.placeText(text) }
+    }
+
+    // MARK: Text plus screenshots
+
+    public static let pngType = "public.png"
+    /// Between one item and the next, and after the last screenshot.
+    public static let imageGap = 0.35
+
+    /// Pastes dictated text (if any) and then each PNG, as separate Cmd+V presses, ported
+    /// from inject_text_and_images and _paste_sequence_via_pasteboard in platform_mac.py.
+    /// Electron and Chromium composers (T3 Code, Slack, Chrome web apps) turn a pasted image
+    /// into an attachment, but only one image per paste and only if the clipboard still
+    /// holds it when their paste handler runs, so each item waits to be read and then gets a
+    /// short gap before the next one replaces it. The old clipboard is put back once, after
+    /// the last item, so clipboard managers see one round trip.
+    ///
+    /// If the text finds no text box, or the target never reads an item, that item stays on
+    /// the clipboard and the rest are skipped (the screenshots are still on disk). Anything
+    /// copied part way through stops the sequence and is left alone. Dictations without
+    /// marks never come here; they keep paste(_:into:).
+    public func pasteSequence(text: String, images: [Data], into target: TargetApp?) throws -> SequenceOutcome {
+        try transaction.withLock {
+            sleep(0.05)
+            let outcome = try pasteSequenceLocked(text: text, images: images, into: target)
+            sleep(0.05)
+            return outcome
+        }
+    }
+
+    public struct SequenceOutcome: Equatable, Sendable {
+        /// How many items the target read.
+        public var pasted: Int
+        public var total: Int
+        public var landed: Bool
+        public var focusRole: String?
+        public var refocused: Bool
+        public var clipboard: PasteboardSnapshot.Readability
+    }
+
+    private enum Item {
+        case text(String), png(Data)
+        var isText: Bool { if case .text = self { return true } else { return false } }
+    }
+
+    private func pasteSequenceLocked(text: String, images: [Data], into target: TargetApp?) throws -> SequenceOutcome {
+        let refocused = restoreFocus(target)
+        if refocused { sleep(Self.refocusSettle) }
+        let hasText = !PythonText.strip(text).isEmpty
+        let items: [Item] = (hasText ? [.text(text)] : []) + images.map { .png($0) }
+        var role: String?
+        var outcome = SequenceOutcome(pasted: 0, total: items.count, landed: true, focusRole: nil, refocused: refocused, clipboard: .complete)
+        guard !items.isEmpty else { return outcome }
+
+        let saved = pasteboard.snapshot()
+        outcome.clipboard = saved.readability
+        if saved.readability != .complete {
+            log("The clipboard couldn't be read in full (\(saved.readability.rawValue)), so it won't be put back after this paste; the dictated text stays on it.")
+        }
+        func stop(at pasted: Int) -> SequenceOutcome {
+            environment.playFailureSound()
+            log("Paste with screenshots stopped after \(pasted) of \(items.count) item(s) (focus \(role ?? "unknown")). The next item is left on the clipboard.")
+            outcome.pasted = pasted
+            outcome.landed = false
+            outcome.focusRole = role
+            return outcome
+        }
+        var offered = pasteboard.changeCount
+        for (index, item) in items.enumerated() {
+            if index > 0 {
+                sleep(Self.imageGap)
+                // Something else was copied mid-sequence. It's the user's clipboard now: stop
+                // without touching it or putting the old one back over it.
+                if pasteboard.changeCount != offered { return stop(at: index) }
+            }
+            let read = DispatchSemaphore(value: 0)
+            let accepted: Bool
+            switch item {
+            case let .text(words): accepted = pasteboard.offerLazily(words, onRead: { read.signal() })
+            case let .png(data): accepted = pasteboard.offerLazily(data: data, type: Self.pngType, onRead: { read.signal() })
+            }
+            guard accepted else { throw PasteError() }
+            offered = pasteboard.changeCount
+            environment.postCommandV()
+            guard read.wait(timeout: .now() + readTimeout) == .success else {
+                leave(item, offered: offered)
+                return stop(at: index)
+            }
+            // The provider hands the data over when its callback returns.
+            sleep(Self.providerHandOver)
+            if index == 0 && item.isText {
+                let (hasTextBox, focusRole) = waitForTextBox(pid: environment.frontmostPID())
+                role = focusRole
+                if !hasTextBox {
+                    leave(item, offered: offered)
+                    return stop(at: 1)
+                }
+            }
+        }
+        // Chromium reads the image, then builds the attachment on a later task, so the last
+        // image gets the same breathing room as the ones before it.
+        if items.last.map({ !$0.isText }) == true { sleep(Self.imageGap) }
+        if pasteboard.changeCount == offered {
+            // Never put back a copy known to be missing things: that would wipe the clipboard.
+            if saved.readability == .complete {
+                pasteboard.restore(saved.items)
+            } else if hasText {
+                pasteboard.placeText(text)
+            } else if let last = images.last {
+                pasteboard.placeData(last, type: Self.pngType)
+            }
+        }
+        outcome.pasted = items.count
+        outcome.focusRole = role
+        log("NSPasteboard+Cmd+V: \(text.count) chars and \(images.count) screenshot(s) injected (focus \(role ?? "unknown")\(refocused ? ", refocused target" : ""))")
+        return outcome
+    }
+
+    private func leave(_ item: Item, offered: Int) {
+        // Leave anything copied since the paste alone.
+        guard pasteboard.changeCount == offered else { return }
+        switch item {
+        case let .text(words): pasteboard.placeText(words)
+        case let .png(data): pasteboard.placeData(data, type: Self.pngType)
+        }
     }
 
     /// Whether a text box has focus now the target has read the paste. Focus on something

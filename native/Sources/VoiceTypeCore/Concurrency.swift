@@ -56,7 +56,25 @@ public enum Deadlines {
     public static let maxRecording = 120.0
 
     /// Long recordings get longer, but there's never an unbounded wait. From operation_watchdog.py.
-    public static func finalisation(durationSec: Double) -> Double { max(30, durationSec * 2) }
+    /// A dictation with screen marks gets extra for everything only it does, each bounded on
+    /// its own: waiting for the screenshots, the word timing pass, and pasting each
+    /// screenshot (a 0.35 s gap and up to 2 s for the target to read it). Without the extra,
+    /// a short clip with ten marks pasted into a slow app could hit the watchdog mid-paste.
+    public static func finalisation(durationSec: Double, marks: Int = 0) -> Double {
+        let base = max(30, durationSec * 2)
+        guard marks > 0 else { return base }
+        let n = Double(marks)
+        let captures = DictationMarks.captureWait + DictationMarks.captureWaitPerMark * n
+        let paste = n * (Paster.imageGap + Paster.readTimeout + Paster.providerHandOver) + Paster.imageGap
+        return base + captures + wordTiming(durationSec: durationSec) + paste
+    }
+
+    /// The most the word timing pass for screen marks' markers gets, from when it starts
+    /// (straight after the final pass) to its result, including loading its context if a
+    /// mark was drawn just before key-up. Measured: about 0.4 s on short clips, 3 to 7 s on
+    /// 60 to 90 s ones with the Mac heavily loaded. Past this the markers use the final
+    /// pass's token timestamps instead.
+    public static func wordTiming(durationSec: Double) -> Double { 4 + durationSec * 0.1 }
 }
 
 /// Calls `onTimeout` once if `complete()` doesn't come first. Metal and Core Audio calls can't

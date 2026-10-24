@@ -7,13 +7,17 @@ public struct TranscriptSegment: Sendable {
     public var noSpeechProb: Double
     /// Probabilities of the segment's text tokens, for the vote work in phase 4.
     public var tokenProbs: [Double]
+    /// Each word's time, with its leading space (" button"), only when the options asked for
+    /// word timings: dictations with screen marks place their "[n]" markers with them.
+    public var words: [TimedText]
 
-    public init(text: String, startSec: Double, endSec: Double, noSpeechProb: Double, tokenProbs: [Double]) {
+    public init(text: String, startSec: Double, endSec: Double, noSpeechProb: Double, tokenProbs: [Double], words: [TimedText] = []) {
         self.text = text
         self.startSec = startSec
         self.endSec = endSec
         self.noSpeechProb = noSpeechProb
         self.tokenProbs = tokenProbs
+        self.words = words
     }
 }
 
@@ -35,10 +39,14 @@ public struct TranscribeOptions: Sendable {
     public var promptTokens: [Int32]
     /// 0 for greedy decoding, which is what the app uses; above 0 is beam search.
     public var beamSize: Int
+    /// Time each word (whisper.cpp's token timestamps). Only dictations with screen marks
+    /// ask, to place their markers; it doesn't change the text.
+    public var wordTimings: Bool
 
-    public init(promptTokens: [Int32] = [], beamSize: Int = 0) {
+    public init(promptTokens: [Int32] = [], beamSize: Int = 0, wordTimings: Bool = false) {
         self.promptTokens = promptTokens
         self.beamSize = beamSize
+        self.wordTimings = wordTimings
     }
 }
 

@@ -8,6 +8,7 @@ final class GeneralPasteboard: VoiceTypeCore.Pasteboard, @unchecked Sendable {
     private let board = NSPasteboard.general
     // The pasteboard only holds a weak reference to its data provider.
     private var liveProvider: TextProvider?
+    private var liveDataProvider: DataProvider?
 
     var changeCount: Int { board.changeCount }
 
@@ -51,6 +52,20 @@ final class GeneralPasteboard: VoiceTypeCore.Pasteboard, @unchecked Sendable {
         board.setString(text, forType: .string)
     }
 
+    func offerLazily(data: Data, type: String, onRead: @escaping @Sendable () -> Void) -> Bool {
+        board.clearContents()
+        let provider = DataProvider(data: data, onRead: onRead)
+        liveDataProvider = provider
+        let item = NSPasteboardItem()
+        item.setDataProvider(provider, forTypes: [NSPasteboard.PasteboardType(type)])
+        return board.writeObjects([item])
+    }
+
+    func placeData(_ data: Data, type: String) {
+        board.clearContents()
+        board.setData(data, forType: NSPasteboard.PasteboardType(type))
+    }
+
     /// macOS 26 can ask before an app reads the clipboard, and the snapshot above is such a
     /// read. This is what the user has chosen, for the status file and permissions window.
     static var accessBehavior: String {
@@ -77,6 +92,24 @@ final class TextProvider: NSObject, NSPasteboardItemDataProvider {
 
     func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem, provideDataForType type: NSPasteboard.PasteboardType) {
         item.setString(text, forType: type)
+        onRead()
+    }
+
+    func pasteboardFinishedWithDataProvider(_ pasteboard: NSPasteboard) {}
+}
+
+/// TextProvider for a screenshot's bytes.
+final class DataProvider: NSObject, NSPasteboardItemDataProvider {
+    let data: Data
+    let onRead: @Sendable () -> Void
+
+    init(data: Data, onRead: @escaping @Sendable () -> Void) {
+        self.data = data
+        self.onRead = onRead
+    }
+
+    func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem, provideDataForType type: NSPasteboard.PasteboardType) {
+        item.setData(data, forType: type)
         onRead()
     }
 

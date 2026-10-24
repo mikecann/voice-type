@@ -8,6 +8,15 @@ public protocol Transcribing: AnyObject, Sendable {
     func preview(_ samples: [Float], prompt: String?, completion: @escaping (Transcript?) -> Void)
     func beginFinal()
     func endFinal()
+    /// Screen marks: load the word timing engine ahead of key-up.
+    func prepareWordTimings()
+    /// Screen marks: starts a timing-only pass over `samples` on the timing engine's own
+    /// thread. Its wait() is bounded by `timeout` and gives nil without a timing engine.
+    func startWordTimings(_ samples: [Float], promptTokens: [Int32], timeout: Double) -> WordTimingPass
+    /// After a wake: free the word timing engine, so the next mark makes a fresh one.
+    func dropWordTimings(reason: String)
+    /// Whether the word timing engine is loaded right now.
+    var wordTimingsLoaded: Bool { get }
 }
 
 extension InferenceWorker: Transcribing {}
@@ -18,7 +27,11 @@ public protocol PillPresenting: AnyObject, Sendable {
     func showRecording(_ preview: String)
     func showProcessing(_ preview: String)
     func showDone(words: Int)
+    /// Words and screenshots pasted, for a dictation with screen marks.
+    func showDone(words: Int, shots: Int)
     func showPasteFailed()
+    /// Marks were drawn but Screen Recording isn't allowed, so there are no screenshots.
+    func showScreenRecordingHint()
     /// The paste landed, but the old clipboard couldn't be read, so it wasn't put back.
     func showClipboardNotKept()
     func hide()
@@ -26,6 +39,7 @@ public protocol PillPresenting: AnyObject, Sendable {
 
 public protocol Pasting: AnyObject, Sendable {
     func paste(_ text: String, into target: TargetApp?) throws -> PasteOutcome
+    func pasteSequence(text: String, images: [Data], into target: TargetApp?) throws -> Paster.SequenceOutcome
 }
 
 extension Paster: Pasting {}
@@ -58,9 +72,12 @@ public struct FinaliseJob: Sendable {
     public var stopAudioSeconds: Double
     /// How long the key was held. Held this long with no audio at all, the stream is broken.
     public var keyHoldSeconds: Double
+    /// What was drawn while the key was held, if anything. Without marks the dictation goes
+    /// exactly as it always did.
+    public var marks: DictationMarks?
 
     public init(samples: [Float], metadata: [(key: String, value: JSONValue)], preview: String, target: TargetApp?,
-                settings: SettingsFile, keyUpAt: Double, stopAudioSeconds: Double, keyHoldSeconds: Double = 0) {
+                settings: SettingsFile, keyUpAt: Double, stopAudioSeconds: Double, keyHoldSeconds: Double = 0, marks: DictationMarks? = nil) {
         self.samples = samples
         self.metadata = metadata
         self.preview = preview
@@ -69,6 +86,7 @@ public struct FinaliseJob: Sendable {
         self.keyUpAt = keyUpAt
         self.stopAudioSeconds = stopAudioSeconds
         self.keyHoldSeconds = keyHoldSeconds
+        self.marks = marks
     }
 }
 
@@ -146,12 +164,20 @@ public final class Finaliser: @unchecked Sendable {
                     log(String(format: "Detected flatline microphone capture; skipping transcription and reconnecting the microphone: %.2fs rms=%.6f peak=%.6f",
                                levels.durationSec, levels.rms, levels.peak))
                 }
+                if job.marks != nil { log("Mark screenshots are kept on disk but not pasted.") }
                 return outcome
             }
             if gated == .skippedLowLevel {
                 update([("status", .string("skipped_low_level"))])
                 pill.hide()
                 log(String(format: "Skipped near-silent clip: %.2fs rms=%.4f peak=%.4f", levels.durationSec, levels.rms, levels.peak))
+                if let marks = job.marks {
+                    log("No words (near-silent clip); pasting \(marks.strokes.count) mark(s) on their own.")
+                    let (paths, images) = loadScreenshots(marks)
+                    update([("screenshots", .strings(paths))])
+                    try pasteWithMarks("", images, marks, job: job, outcome: &outcome, timings: &timings)
+                    update([("timings", .object(timings))])
+                }
                 return outcome
             }
 
@@ -160,16 +186,24 @@ public final class Finaliser: @unchecked Sendable {
             let started = now()
             log("Finalize mode: '\(Self.mode)'")
             var text = ""
+            var transcript: Transcript?
+            var promptTokens: [Int32] = []
             var silencePhrase = false
             // Under 0.3 s Whisper isn't asked, and nothing is typed.
             if levels.durationSec >= 0.3 {
                 do {
                     let settings = job.settings.dictation
                     let samples = job.samples
-                    let result = try transcriber.run { engine, tokens in
-                        try DictationPipeline(engine: engine, settings: settings, options: TranscribeOptions(promptTokens: tokens(settings.vocabularyPrompt)))
-                            .transcribe(samples, levels: levels)
+                    // Word timings only for dictations with marks, to place their markers.
+                    let wordTimings = job.marks != nil
+                    let (result, tokensUsed) = try transcriber.run { engine, tokens in
+                        let prompt = tokens(settings.vocabularyPrompt)
+                        return (try DictationPipeline(engine: engine, settings: settings,
+                                                      options: TranscribeOptions(promptTokens: prompt, wordTimings: wordTimings))
+                            .transcribe(samples, levels: levels), prompt)
                     }
+                    promptTokens = tokensUsed
+                    transcript = result.transcript
                     let raw = result.rawTranscript ?? ""
                     let guarded = RepetitionLoopGuard.guardLoops(raw, durationSec: levels.durationSec)
                     if guarded != raw {
@@ -200,6 +234,11 @@ public final class Finaliser: @unchecked Sendable {
             let elapsed = now() - started
             timings.append(("transcribe_seconds", .double(elapsed)))
             if !text.isEmpty {
+                if let marks = job.marks {
+                    // Bounded: the screenshots get 4 s plus 1 s a mark, the timing pass
+                    // Deadlines.wordTiming, so the words below are always saved and pasted.
+                    text = placeMarkers(text, marks, transcript: transcript, promptTokens: promptTokens, job: job, timings: &timings)
+                }
                 // Saved before pasting, so the words survive whatever the paste does.
                 update([("text", .string(text)), ("status", .string("completed"))])
                 do { try history.append(text, mode: Self.mode) } catch {
@@ -207,31 +246,18 @@ public final class Finaliser: @unchecked Sendable {
                 }
                 log(String(format: "Done (%.2fs) [%@]: %@", elapsed, Self.mode, pythonRepr(text)))
                 outcome.words = PythonText.split(text).count
-                log("Injecting into \(pythonRepr(job.target?.name ?? "unknown")): \(pythonRepr(text))")
-                let pasteStarted = now()
-                let pasted: PasteOutcome
-                do {
-                    pasted = try paster.paste(text, into: job.target)
-                } catch {
-                    // Don't leave the processing pill up if the paste itself blew up.
-                    pill.hide()
-                    throw error
-                }
-                outcome.landed = pasted.landed
-                timings.append(("paste_seconds", .double(now() - pasteStarted)))
-                if let read = pasted.readLatency { timings.append(("paste_read_seconds", .double(read))) }
-                timings.append(("key_up_to_paste_seconds", .double(now() - job.keyUpAt)))
-                if pasted.landed && pasted.clipboard == .denied && !toldAboutClipboard {
-                    // Once per run: the words landed, but the old clipboard is gone.
-                    toldAboutClipboard = true
-                    log("Clipboard access is denied for Voice Type Native, so the dictated text replaces whatever was on the clipboard. Allow it under System Settings > Privacy & Security > Paste from Other Apps (the Permissions window has a button).")
-                    pill.showClipboardNotKept()
-                } else if pasted.landed {
-                    pill.showDone(words: outcome.words)
+                if let marks = job.marks {
+                    let (paths, images) = loadScreenshots(marks)
+                    update([("screenshots", .strings(paths))])
+                    try pasteWithMarks(text, images, marks, job: job, outcome: &outcome, timings: &timings)
                 } else {
-                    // The text was left on the clipboard and Funk played.
-                    pill.showPasteFailed()
+                    try pasteText(text, job: job, outcome: &outcome, timings: &timings)
                 }
+            } else if let marks = job.marks {
+                log("No words (\(silencePhrase ? "near-silent clip" : String(format: "%.2fs [%@]", elapsed, Self.mode))); pasting \(marks.strokes.count) mark(s) on their own.")
+                let (paths, images) = loadScreenshots(marks)
+                update([("screenshots", .strings(paths))])
+                try pasteWithMarks("", images, marks, job: job, outcome: &outcome, timings: &timings)
             } else if !silencePhrase {
                 pill.hide()
                 log(String(format: "Nothing to paste (%.2fs) [%@].", elapsed, Self.mode))
@@ -243,6 +269,133 @@ public final class Finaliser: @unchecked Sendable {
         }
         update([("timings", .object(timings))])
         return outcome
+    }
+
+    private func pasteText(_ text: String, job: FinaliseJob, outcome: inout FinaliseOutcome, timings: inout [(key: String, value: JSONValue)]) throws {
+        log("Injecting into \(pythonRepr(job.target?.name ?? "unknown")): \(pythonRepr(text))")
+        let pasteStarted = now()
+        let pasted: PasteOutcome
+        do {
+            pasted = try paster.paste(text, into: job.target)
+        } catch {
+            // Don't leave the processing pill up if the paste itself blew up.
+            pill.hide()
+            throw error
+        }
+        outcome.landed = pasted.landed
+        timings.append(("paste_seconds", .double(now() - pasteStarted)))
+        if let read = pasted.readLatency { timings.append(("paste_read_seconds", .double(read))) }
+        timings.append(("key_up_to_paste_seconds", .double(now() - job.keyUpAt)))
+        if pasted.landed && pasted.clipboard == .denied && !toldAboutClipboard {
+            // Once per run: the words landed, but the old clipboard is gone.
+            toldAboutClipboard = true
+            log("Clipboard access is denied for Voice Type Native, so the dictated text replaces whatever was on the clipboard. Allow it under System Settings > Privacy & Security > Paste from Other Apps (the Permissions window has a button).")
+            pill.showClipboardNotKept()
+        } else if pasted.landed {
+            pill.showDone(words: outcome.words)
+        } else {
+            // The text was left on the clipboard and Funk played.
+            pill.showPasteFailed()
+        }
+    }
+
+    // MARK: Screen marks
+
+    /// Adds "[n]" for each captured mark where it was drawn in the speech, from Whisper's
+    /// word timings, aligned to the corrected text. Waits for the screenshots first, since a
+    /// mark whose capture failed gets no marker.
+    ///
+    /// The words' times come from a timing-only pass with whisper.cpp's DTW alignment, which
+    /// put markers after the same word as Python's mlx-whisper timings 91% of the time on
+    /// saved dictations (scripts/marker-check.py). Without it ("marker_timings": "rough",
+    /// no timing engine, or a pass that ran out of time), the final pass's own token
+    /// timestamps, which only managed 40%.
+    ///
+    /// The pass runs on its own thread, and starts before the wait for the screenshots, so
+    /// the two overlap, when a screenshot is already in or the timing context is loaded
+    /// already. Otherwise it waits for a screenshot to land, so the 1 GB context is never
+    /// loaded for marks that can't be captured (the capture itself starts the load).
+    private func placeMarkers(_ text: String, _ marks: DictationMarks, transcript: Transcript?, promptTokens: [Int32], job: FinaliseJob,
+                              timings: inout [(key: String, value: JSONValue)]) -> String {
+        let accurate = job.settings.markerTimings == .accurate
+        let timeout = Deadlines.wordTiming(durationSec: Double(job.samples.count) / Double(sampleRate))
+        var pass: WordTimingPass?
+        var timingStarted = 0.0
+        func startPass() {
+            timingStarted = now()
+            pass = transcriber.startWordTimings(job.samples, promptTokens: promptTokens, timeout: timeout)
+        }
+        if accurate && (marks.hasScreenshot || (marks.mayHaveScreenshots && transcriber.wordTimingsLoaded)) { startPass() }
+        let waitStarted = now()
+        let numbers = marks.numbers()
+        timings.append(("screenshots_wait_seconds", .double(now() - waitStarted)))
+        guard !numbers.isEmpty else {
+            pass?.cancel()
+            return text
+        }
+        if accurate && pass == nil { startPass() }
+        var source = "token timestamp word"
+        var words: [TimedText] = [], segments: [TimedText] = []
+        if let pass {
+            (words, segments) = MarkMarkers.timings(from: pass.wait())
+            timings.append(("word_timing_seconds", .double(now() - timingStarted)))
+            if pass.timedOut {
+                log(String(format: "The word timing pass took over %.1fs; placing markers with the final pass's token timestamps instead.", timeout))
+            }
+            if !words.isEmpty { source = "DTW word" }
+        }
+        if words.isEmpty { (words, segments) = MarkMarkers.timings(from: transcript) }
+        let spoken = (words.isEmpty ? segments : words).map(\.text).joined(separator: " ")
+        let counts = MarkMarkers.spokenWordCounts(marks.audioTimes(numbers), words: words, segments: segments)
+        let placed = MarkMarkers.insertMarkers(text, spoken: spoken, wordCounts: counts, numbers: numbers)
+        log("Placed \(numbers.count) mark marker(s) using \(!words.isEmpty ? source : !segments.isEmpty ? "segment" : "no") timings.")
+        return placed
+    }
+
+    /// The screenshots to paste, one per window, in order of each one's lowest mark, and
+    /// their bytes. Waits for the capture worker if it's still going.
+    private func loadScreenshots(_ marks: DictationMarks) -> (paths: [String], images: [Data]) {
+        let paths = marks.imagePaths()
+        var images: [Data] = []
+        for path in paths {
+            do { images.append(try Data(contentsOf: URL(fileURLWithPath: path))) } catch {
+                log("Could not read mark screenshot \(path): \(error.localizedDescription)")
+            }
+        }
+        return (paths, images)
+    }
+
+    /// Pastes the text (if any) and then the marks' screenshots, and shows how it went. Marks
+    /// on the same window share one screenshot. A mark whose capture failed (or every mark,
+    /// without Screen Recording) just isn't pasted; the words still are.
+    private func pasteWithMarks(_ text: String, _ images: [Data], _ marks: DictationMarks, job: FinaliseJob, outcome: inout FinaliseOutcome,
+                                timings: inout [(key: String, value: JSONValue)]) throws {
+        guard !images.isEmpty else {
+            if !PythonText.strip(text).isEmpty { try pasteText(text, job: job, outcome: &outcome, timings: &timings) } else { pill.hide() }
+            if marks.permissionMissing { pill.showScreenRecordingHint() }
+            return
+        }
+        log("Injecting into \(pythonRepr(job.target?.name ?? "unknown")): \(pythonRepr(text)) + \(images.count) screenshot(s)")
+        let pasteStarted = now()
+        let pasted: Paster.SequenceOutcome
+        do {
+            pasted = try paster.pasteSequence(text: text, images: images, into: job.target)
+        } catch {
+            pill.hide()
+            throw error
+        }
+        outcome.landed = pasted.landed
+        timings.append(("paste_seconds", .double(now() - pasteStarted)))
+        timings.append(("key_up_to_paste_seconds", .double(now() - job.keyUpAt)))
+        if pasted.landed && pasted.clipboard == .denied && !toldAboutClipboard {
+            toldAboutClipboard = true
+            log("Clipboard access is denied for Voice Type Native, so the dictated text and screenshots replace whatever was on the clipboard. Allow it under System Settings > Privacy & Security > Paste from Other Apps (the Permissions window has a button).")
+            pill.showClipboardNotKept()
+        } else if pasted.landed {
+            pill.showDone(words: PythonText.split(text).count, shots: images.count)
+        } else {
+            pill.showPasteFailed()
+        }
     }
 
     static func segmentJSON(_ segment: TranscriptSegment) -> JSONValue {

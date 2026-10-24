@@ -29,7 +29,13 @@ public final class WhisperEngine: DictationEngine {
     public let threads: Int32
     public let loadMilliseconds: Double
 
-    public init(modelPath: String, useGPU: Bool = true, threads: Int32 = 4) throws {
+    /// A context for screen marks' word timings rather than for typing: DTW alignment over
+    /// large-v3-turbo's alignment heads (what mlx-whisper's word_timestamps does), which
+    /// needs flash attention off. Its text can differ slightly, so only its times are used.
+    public let dtw: Bool
+
+    public init(modelPath: String, useGPU: Bool = true, threads: Int32 = 4, dtw: Bool = false) throws {
+        self.dtw = dtw
         guard FileManager.default.fileExists(atPath: modelPath) else {
             throw WhisperEngineError.modelMissing(modelPath)
         }
@@ -39,7 +45,11 @@ public final class WhisperEngine: DictationEngine {
         let started = DispatchTime.now()
         var params = whisper_context_default_params()
         params.use_gpu = useGPU
-        params.flash_attn = true
+        params.flash_attn = !dtw
+        if dtw {
+            params.dtw_token_timestamps = true
+            params.dtw_aheads_preset = WHISPER_AHEADS_LARGE_V3_TURBO
+        }
         guard let context = whisper_init_from_file_with_params(modelPath, params) else {
             throw WhisperEngineError.loadFailed(modelPath)
         }
@@ -129,6 +139,13 @@ public final class WhisperEngine: DictationEngine {
         // Clips under 30 s are one window and get the same prompt either way, so this
         // changes nothing the benchmark measured.
         p.carry_initial_prompt = true
+        // Word timings for screen marks' "[n]" markers. In the typing context, whisper.cpp's
+        // token timestamps, worked out after each segment is decoded from the timestamp
+        // tokens' probabilities and the audio's energy, so the text is the same either way
+        // (parity.py --word-timings checks it). They're rough, so they're only the fallback
+        // for the DTW context's (see `dtw`), which come with every decode there.
+        p.token_timestamps = options.wordTimings && !dtw
+        p.max_len = 0
 
         if let abort {
             let flag = Unmanaged.passUnretained(abort).toOpaque()
@@ -159,6 +176,7 @@ public final class WhisperEngine: DictationEngine {
 
         let eot = whisper_token_eot(context)
         var segments: [TranscriptSegment] = []
+        var previousEnd: Double?
         for i in 0..<whisper_full_n_segments(context) {
             var probs: [Double] = []
             for j in 0..<whisper_full_n_tokens(context, i) {
@@ -171,9 +189,44 @@ public final class WhisperEngine: DictationEngine {
                 startSec: Double(whisper_full_get_segment_t0(context, i)) / 100,
                 endSec: Double(whisper_full_get_segment_t1(context, i)) / 100,
                 noSpeechProb: Double(whisper_full_get_segment_no_speech_prob(context, i)),
-                tokenProbs: probs
+                tokenProbs: probs,
+                words: options.wordTimings ? words(inSegment: i, eot: eot, previousEnd: &previousEnd) : []
             ))
         }
         return Transcript(segments: segments)
+    }
+
+    /// The segment's text tokens grouped into words: a token whose text starts with a space
+    /// starts a new word, the way mlx-whisper split them for Python. A word runs from its
+    /// first token's start to its last token's end. Token text is raw bytes, and one
+    /// character can span two tokens, so each word's bytes are joined before decoding.
+    private func words(inSegment i: Int32, eot: whisper_token, previousEnd: inout Double?) -> [TimedText] {
+        var words: [TimedText] = []
+        var bytes: [UInt8] = []
+        var start = 0.0, end = 0.0
+        func finish() {
+            if !bytes.isEmpty { words.append(TimedText(start, end, String(decoding: bytes, as: UTF8.self))) }
+            bytes = []
+        }
+        for j in 0..<whisper_full_n_tokens(context, i) {
+            let token = whisper_full_get_token_data(context, i, j)
+            guard token.id < eot, let cString = whisper_token_to_str(context, token.id) else { continue }
+            let piece = Array(UnsafeBufferPointer(start: UnsafeRawPointer(cString).assumingMemoryBound(to: UInt8.self), count: strlen(cString)))
+            guard !piece.isEmpty else { continue }
+            // whisper.cpp stamps each token with the moment the alignment moves past it, so
+            // its t_dtw is where the token ends; it starts where the one before it ended
+            // (OpenAI's and mlx-whisper's "jump" into the token).
+            let tokenStart = dtw ? (previousEnd ?? Double(whisper_full_get_segment_t0(context, i)) / 100) : Double(token.t0) / 100
+            let tokenEnd = Double(dtw ? token.t_dtw : token.t1) / 100
+            if bytes.isEmpty || piece[0] == UInt8(ascii: " ") {
+                finish()
+                start = tokenStart
+            }
+            bytes += piece
+            end = tokenEnd
+            previousEnd = tokenEnd
+        }
+        finish()
+        return words
     }
 }

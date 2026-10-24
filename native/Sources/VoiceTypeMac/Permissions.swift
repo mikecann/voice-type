@@ -11,6 +11,7 @@ enum Permission: String, CaseIterable {
     case inputMonitoring = "input_monitoring"
     case microphone
     case pasteFromOtherApps = "paste_from_other_apps"
+    case screenRecording = "screen_recording"
 
     var title: String {
         switch self {
@@ -18,6 +19,7 @@ enum Permission: String, CaseIterable {
         case .inputMonitoring: return "Input Monitoring"
         case .microphone: return "Microphone"
         case .pasteFromOtherApps: return "Paste from other apps"
+        case .screenRecording: return "Screen Recording"
         }
     }
 
@@ -27,6 +29,7 @@ enum Permission: String, CaseIterable {
         case .inputMonitoring: return "Sees F12 and Right Control while another app is in front."
         case .microphone: return "Hears you while the key is down."
         case .pasteFromOtherApps: return "Copies what's on your clipboard before pasting, so it can put it back."
+        case .screenRecording: return "Screenshots the window you draw on while holding the key. Asked the first time you draw."
         }
     }
 
@@ -39,6 +42,7 @@ enum Permission: String, CaseIterable {
         case .inputMonitoring: anchor = "?Privacy_ListenEvent"
         case .microphone: anchor = "?Privacy_Microphone"
         case .pasteFromOtherApps: anchor = ""
+        case .screenRecording: anchor = "?Privacy_ScreenCapture"
         }
         return URL(string: "x-apple.systempreferences:com.apple.preference.security\(anchor)")!
     }
@@ -63,6 +67,18 @@ enum Permission: String, CaseIterable {
             case "ask": return "ask"
             default: return "not_asked"
             }
+        case .screenRecording:
+            // macOS only says yes or not yet; a refusal looks the same as never asked.
+            return MacScreen.captureAllowed ? "allowed" : "denied"
+        }
+    }
+
+    /// Dictation can't start without these. The clipboard one only matters for putting the
+    /// clipboard back, and Screen Recording only for drawing, which asks for it itself.
+    var isRequired: Bool {
+        switch self {
+        case .pasteFromOtherApps, .screenRecording: return false
+        default: return true
         }
     }
 
@@ -93,6 +109,9 @@ enum Permission: String, CaseIterable {
             // do one now, while someone's watching, rather than in the middle of a dictation.
             _ = NSPasteboard.general.pasteboardItems?.first?.types.first.flatMap { NSPasteboard.general.data(forType: $0) }
             return
+        case .screenRecording:
+            // The first time, this shows macOS's prompt and adds the app to the list.
+            _ = CGRequestScreenCaptureAccess()
         }
         NSWorkspace.shared.open(settingsURL)
     }

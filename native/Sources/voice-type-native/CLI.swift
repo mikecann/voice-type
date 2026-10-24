@@ -22,7 +22,7 @@ struct CLI {
 
     func loadEngine() -> WhisperEngine {
         do {
-            return try WhisperEngine(modelPath: options.model, useGPU: options.useGPU, threads: options.threads)
+            return try WhisperEngine(modelPath: options.model, useGPU: options.useGPU, threads: options.threads, dtw: options.dtw)
         } catch {
             fail(error.localizedDescription, code: 1)
         }
@@ -32,7 +32,8 @@ struct CLI {
     func makePipeline(_ engine: WhisperEngine, timed: TimedEngine? = nil) -> DictationPipeline {
         let settings = VoiceTypeSettings.load(from: options.settings)
         let tokens = engine.promptTokens(for: settings.vocabularyPrompt)
-        return DictationPipeline(engine: timed ?? engine, settings: settings, options: TranscribeOptions(promptTokens: tokens))
+        return DictationPipeline(engine: timed ?? engine, settings: settings,
+                                 options: TranscribeOptions(promptTokens: tokens, wordTimings: options.wordTimings))
     }
 
     /// The full pipeline, or with --raw only Whisper.
@@ -72,7 +73,7 @@ struct CLI {
         let timed = TimedEngine(engine)
         var pipeline = makePipeline(engine, timed: timed)
         let defaultTokens = pipeline.options.promptTokens
-        emit(["ready": true, "load_ms": engine.loadMilliseconds, "pid": Int(getpid()), "raw": options.raw])
+        emit(["ready": true, "load_ms": engine.loadMilliseconds, "pid": Int(getpid()), "raw": options.raw, "word_timings": options.wordTimings])
 
         while let line = readLine() {
             guard let data = line.data(using: .utf8),
@@ -97,11 +98,17 @@ struct CLI {
                     "rms": result.levels.rms,
                     "peak": result.levels.peak,
                     "segments": (result.transcript?.segments ?? []).map { segment -> [String: Any] in
-                        [
+                        var fields: [String: Any] = [
                             "text": PythonText.strip(segment.text),
                             "no_speech_prob": segment.noSpeechProb,
                             "token_p": segment.tokenProbs,
                         ]
+                        if options.wordTimings {
+                            fields["start"] = segment.startSec
+                            fields["end"] = segment.endSec
+                            fields["words"] = segment.words.map { [$0.start, $0.end, $0.text] as [Any] }
+                        }
+                        return fields
                     },
                 ]
                 if let raw = result.rawTranscript { reply["raw_text"] = raw }
@@ -180,6 +187,36 @@ struct CLI {
             } catch {
                 fail("can't write \(json): \(error.localizedDescription)", code: 1)
             }
+        }
+    }
+
+    // MARK: composite
+
+    /// Draws marks onto a PNG and shrinks, quantizes and saves it exactly as the app does
+    /// with a capture, so the compositor can be checked without holding the key.
+    func composite() {
+        guard options.positional.count == 2, let rectText = options.rect else { fail("composite needs IN.png OUT.png --rect X,Y,W,H\n\n\(usage)") }
+        let numbers = rectText.split(separator: ",").compactMap { Double($0) }
+        guard numbers.count == 4 else { fail("--rect needs four numbers: X,Y,W,H") }
+        var strokes: [Stroke] = []
+        if let marks = options.marks {
+            guard let data = FileManager.default.contents(atPath: marks),
+                  let list = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { fail("can't read \(marks)") }
+            strokes = list.enumerated().map { i, mark in
+                let points = (mark["points"] as? [[Double]] ?? []).map { MarkPoint($0[0], $0[1]) }
+                return Stroke(points: points, startedAt: 0, endedAt: 1, number: mark["number"] as? Int ?? i + 1)
+            }
+        }
+        do {
+            let input = try Data(contentsOf: URL(fileURLWithPath: options.positional[0]))
+            let started = DispatchTime.now().uptimeNanoseconds
+            let png = try MarkCompositor.compositePNG(input, captureRect: MarkRect(numbers[0], numbers[1], numbers[2], numbers[3]), strokes: strokes)
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6
+            try png.write(to: URL(fileURLWithPath: options.positional[1]))
+            print(String(format: "%@: %d KB -> %d KB in %.0f ms (%@)", options.positional[1], input.count / 1024, png.count / 1024, ms,
+                         strokes.map(\.kind.rawValue).joined(separator: ", ")))
+        } catch {
+            fail(error.localizedDescription, code: 1)
         }
     }
 
