@@ -3,7 +3,7 @@ import Synchronization
 import VoiceTypeCore
 import VoiceTypeWhisper
 
-/// Voice Type Native as a menu bar app: no Dock icon, its own LaunchAgent, Python's lock.
+/// Voice Type Native as a menu bar app: no Dock icon, its own LaunchAgent and instance lock.
 ///
 /// Threads, as PLAN.md lays them out: the keyboard tap on its own run loop, the controller on
 /// one serial queue, Core Audio's callback and a drain queue, whisper on its own thread, the
@@ -42,12 +42,8 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
     private var signals: [DispatchSourceSignal] = []
     private var status = NativeStatus(pid: getpid(), state: "starting")
     private var waitingLogged = Set<String>()
-    private var handingOver = false
     private var tapWarningLogged = false
     private let exiting = Atomic<Bool>(false)
-    /// Opened by hand while Python is the one in use: the permissions window and the switch,
-    /// never the lock, the tap or the status file (which belongs to the copy that dictates).
-    private var windowOnly = false
     private var dictationStarted = false
     private var backoff: DispatchWorkItem?
     // On statusQueue: a state of the app's own when there's no controller (retrying or
@@ -78,8 +74,6 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
             setEnabled: { [weak self] on in self?.onController { $0.setEnabled(on) } },
             showPermissions: { [weak self] in self?.permissionsWindow.show() },
             openLog: { [weak self] in if let url = self?.logFile.url { NSWorkspace.shared.open(url) } },
-            switchToPython: { [weak self] in self?.switchToPython(fromCommandLine: false) },
-            switchToNative: { [weak self] in self?.switchToNative() },
             tryAgain: { [weak self] in self?.tryAgain() },
             quit: { [weak self] in self?.quit() }
         ), catalog: catalog)
@@ -96,48 +90,24 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
 
     private func lockSituation() -> LockPolicy.Situation {
         let holder = lock.recordedPID().map { LockHolder.identify(pid: $0) } ?? .nobody
-        let alive: Bool
-        switch holder {
-        case let .native(pid): alive = ProcessLookup.isAlive(pid: pid)
-        case let .python(pid?): alive = ProcessLookup.isAlive(pid: pid)
-        default: alive = false
-        }
+        var alive = false
+        if case let .native(pid) = holder { alive = ProcessLookup.isAlive(pid: pid) }
         let installed = FileManager.default.fileExists(atPath: LaunchAgents.nativePlist.path)
-        // launchctl only where the answer matters.
-        let handOpened = !supervised && !relaunched
-        let nativeEnabled = handOpened && installed && !launchControl.isDisabled(LaunchAgents.nativeLabel)
-        // Python's agent still owns the hotkey if it's enabled and launchd runs it or will
-        // bring it back (it exited 75 and is in its throttle). One that quit with 0 won't.
-        let pythonActive = supervised && !launchControl.isDisabled(LaunchAgents.pythonLabel) && launchControl.willRun(LaunchAgents.pythonLabel)
-        return LockPolicy.Situation(supervised: supervised, relaunched: relaunched, nativeAgentInstalled: installed, nativeAgentEnabled: nativeEnabled,
-                                    pythonAgentActive: pythonActive, holder: holder, holderAlive: alive, ownPID: getpid())
+        return LockPolicy.Situation(supervised: supervised, relaunched: relaunched, nativeAgentInstalled: installed,
+                                    holder: holder, holderAlive: alive, ownPID: getpid())
     }
 
-    /// No dictation, and no keyboard tap, without Python's lock. See LockPolicy for who may
-    /// take it. The situation is worked out off the main thread, since it can run launchctl.
+    /// No dictation, and no keyboard tap, without the instance lock. See LockPolicy for who
+    /// may take it.
     private func tryLock() {
-        // A copy that's handing over to launchd's leaves the lock to it.
-        guard !handingOver, !windowOnly, !lock.isHeld else { return }
-        housekeeping.async { [self] in
-            let plan = LockPolicy.plan(lockSituation())
-            DispatchQueue.main.async { self.act(on: plan) }
-        }
-    }
-
-    private func act(on plan: LockPolicy.Plan) {
-        guard !handingOver, !windowOnly, !lock.isHeld else { return }
-        switch plan {
+        guard !lock.isHeld else { return }
+        switch LockPolicy.plan(lockSituation()) {
         case .take:
             if lock.tryAcquire() {
                 lockAcquired()
                 return
             }
-            if !supervised && !relaunched {
-                // Opened by hand with no LaunchAgent installed, and Python has the lock.
-                showWindowOnly()
-                return
-            }
-            noteWaiting("Python Voice Type holds voice-type.instance.lock (pid \(lock.recordedPID().map(String.init) ?? "unknown")); waiting for it to quit. Use Switch to Voice Type Native to take over.")
+            noteWaiting("voice-type.instance.lock is held by another process (pid \(lock.recordedPID().map(String.init) ?? "unknown")); waiting for it to let go.")
         case let .wait(why):
             noteWaiting(why)
         case let .quit(why):
@@ -146,9 +116,6 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
             exit(0)
         case .startAgentAndQuit:
             startLaunchdCopyAndQuit()
-            return
-        case .uiOnly:
-            showWindowOnly()
             return
         }
         publish(nil)
@@ -159,58 +126,28 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
         if waitingLogged.insert(why).inserted { log(why) }
     }
 
-    /// The hand-opened copy while Python is in use: grant permissions, switch, nothing else.
-    /// It never polls for the lock, and makes way once launchd's copy has it.
-    private func showWindowOnly() {
-        if !windowOnly {
-            windowOnly = true
-            log("Opened by hand while Python Voice Type is the one in use, so this copy only shows the permissions and the switch; it never takes the hotkey.")
-            permissionsWindow.show()
-        }
-        publish(nil)
-        watchForLaunchdCopy()
-    }
-
-    private func watchForLaunchdCopy() {
-        guard windowOnly, !handingOver else { return }
-        // Only the pid in the file: probing the lock itself could, for an instant, make a
-        // Python worker that's starting think it's a duplicate.
-        if case let .native(pid) = lock.recordedPID().map({ LockHolder.identify(pid: $0) }) ?? .nobody, pid != getpid(),
-           ProcessLookup.isAlive(pid: pid) {
-            quitNow("Voice Type Native's LaunchAgent copy (pid \(pid)) has the hotkey now; quitting this window-only copy.")
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.watchForLaunchdCopy() }
-    }
-
-    /// Opened by hand while native is the chosen app but launchd's copy isn't running (Quit
-    /// from its menu, say): start that one, so the copy that dictates is always launchd's.
+    /// Opened by hand while the LaunchAgent is installed: start launchd's copy (enabling its
+    /// agent if it was disabled, or kickstarting it after Quit from its menu) and quit, so the
+    /// copy that dictates is always launchd's.
     private func startLaunchdCopyAndQuit() {
-        log("Voice Type Native's LaunchAgent is enabled but its copy isn't running; starting it instead of this one.")
+        log("Opened by hand; starting Voice Type Native's LaunchAgent instead of dictating from this copy.")
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             do {
-                if launchControl.isLoaded(LaunchAgents.nativeLabel) {
-                    try launchControl.kickstart(LaunchAgents.nativeLabel, restart: false)
-                } else {
-                    try launchControl.bootstrap(LaunchAgents.nativePlist)
-                }
+                try LaunchAgents.start(launchControl)
                 quitNow("Started Voice Type Native's LaunchAgent; quitting this copy.")
             } catch {
                 log("Couldn't start Voice Type Native's LaunchAgent: \(error.localizedDescription)")
                 DispatchQueue.main.async {
-                    self.showWindowOnly()
-                    Self.alert("Couldn't start Voice Type Native", "\(error.localizedDescription)\n\nTry `voice-type-native switch native` in Terminal.")
+                    Self.alert("Couldn't start Voice Type Native", "\(error.localizedDescription)\n\nRunning native/scripts/build-app.sh again reinstalls it.")
+                    self.quitNow("Quitting after the LaunchAgent didn't start.")
                 }
             }
         }
     }
 
     private func lockAcquired() {
-        log("Holding voice-type.instance.lock; a Python worker started by mistake will exit quietly.")
-        lock.touchHeartbeat()
-        repeating(every: 2, on: housekeeping) { [weak self] in
-            self?.lock.touchHeartbeat()
-            self?.noteHealth()
-        }
+        log("Holding voice-type.instance.lock, so no other copy of Voice Type Native can dictate.")
+        repeating(every: 2, on: housekeeping) { [weak self] in self?.noteHealth() }
         let recent = history.recent()
         let plan = RestartBackoff.plan(recent, now: Date())
         switch plan {
@@ -224,8 +161,8 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
             backoff = item
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
         case .giveUp:
-            // Up, holding the lock so Python isn't started by mistake, but without the tap, so
-            // F12 and Right Control work as normal keys until someone fixes it.
+            // Up, holding the lock so a second copy doesn't start dictating, but without the
+            // tap, so F12 and Right Control work as normal keys until someone fixes it.
             log(RestartBackoff.message(plan, recent: recent))
             setAppState(("needs_attention", RestartBackoff.message(plan, recent: recent)))
         }
@@ -351,8 +288,8 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
     /// The tap needs Accessibility and Input Monitoring; without them creating it fails, so
     /// it's tried again every two seconds and starts working as soon as they're granted.
     private func startTap() {
-        // Never without the lock (this also ends a permission retry loop after a hand-over),
-        // and never without a controller to take the keys (backing off, or given up).
+        // Never without the lock, and never without a controller to take the keys (backing
+        // off, or given up).
         guard lock.isHeld, dictationStarted, !exiting.load(ordering: .relaxed) else { return }
         if tap == nil { tap = makeTap() }
         guard let tap, tap.status != .running else { return }
@@ -403,12 +340,11 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
     // MARK: Status
 
     /// Merges the controller's view with the app's (lock, tap, permissions), then writes the
-    /// status file and updates the menu.
+    /// status file and updates the menu. Only the copy holding the lock writes the file, so a
+    /// second copy opened by hand doesn't overwrite what the one dictating says.
     private func publish(_ snapshot: ControllerSnapshot?) {
         let holdsLock = lock.isHeld
         let tapStatus = tap?.status.rawValue ?? KeyboardTap.Status.notStarted.rawValue
-        // The window-only copy leaves the file to the copy that dictates.
-        let writeFile = !windowOnly
         if let snapshot { tap?.setSwallowing(snapshot.swallowsHotkeys) }
         statusQueue.async { [self] in
             if let snapshot {
@@ -424,7 +360,7 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
                                                                       seconds: last.durationSec, words: last.words, landed: last.landed)
                 }
             }
-            status.holdsPythonLock = holdsLock
+            status.holdsLock = holdsLock
             status.hotkeyListener = tapStatus
             status.permissions = Permission.summary
             status.pasteboardAccess = GeneralPasteboard.accessBehavior
@@ -435,11 +371,11 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
                 shown.state = appState.state
                 shown.message = appState.message
             } else if !holdsLock {
-                shown.state = "waiting_for_python"
+                shown.state = "waiting_for_lock"
             } else if shown.state == "idle" && tapStatus != KeyboardTap.Status.running.rawValue {
                 shown.state = "waiting_for_permission"
             }
-            if writeFile {
+            if holdsLock {
                 do { try shown.write() } catch { logFile.log("Status file write failed: \(error.localizedDescription)") }
             }
             DispatchQueue.main.async { self.menu?.update(shown) }
@@ -447,19 +383,13 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
     }
 
     private func writeFinalStatus(_ state: String) {
-        guard !windowOnly else { return }
+        guard lock.isHeld else { return }
         statusQueue.sync {
             status.state = state
-            status.holdsPythonLock = false
+            status.holdsLock = false
             status.updatedAt = Timestamp(Date()).utcISOFormat
             try? status.write()
         }
-    }
-
-    /// For `voice-type-native switch python`, which asked for the hand-over and is waiting.
-    private func recordHandoverFailure(_ why: String) {
-        statusQueue.async { [self] in status.handoverFailure = NativeStatus.HandoverFailure(at: Date().timeIntervalSince1970, message: why) }
-        publish(nil)
     }
 
     // MARK: Leaving
@@ -514,15 +444,13 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
 
     private func installSignalHandlers() {
         // `voice-type-native restart` sends SIGUSR1: restart as soon as nothing is being
-        // dictated. `switch python` sends SIGUSR2: hand over to Python once idle. launchd's
-        // bootout sends SIGTERM: finish a dictation first if one is running, but never take
-        // longer than launchd's 20 s grace.
-        for number in [SIGUSR1, SIGUSR2, SIGTERM] {
+        // dictated. launchd's bootout sends SIGTERM: finish a dictation first if one is
+        // running, but never take longer than launchd's 20 s grace.
+        for number in [SIGUSR1, SIGTERM] {
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
             source.setEventHandler { [weak self] in
                 guard let self else { return }
-                if self.windowOnly { self.quitNow("Signal \(number) received by the window-only copy; quitting.") }
                 switch number {
                 case SIGUSR1:
                     // Asked for, so not a failure: it doesn't count towards the backoff, and
@@ -531,9 +459,6 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
                     self.history.clear()
                     guard self.controller != nil else { self.exitForRestart(); return }
                     self.onController { $0.whenIdle("Restarting") { self.exitForRestart() } }
-                case SIGUSR2:
-                    self.log("Switch to Python requested from the command line.")
-                    self.switchToPython(fromCommandLine: true)
                 default:
                     self.log("Signal SIGTERM received; shutting down.")
                     guard self.controller != nil else { self.quitNow("Stopped by launchd.") }
@@ -558,71 +483,6 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
             do { try settings.save() } catch { self.log("Settings save failed: \(error.localizedDescription)") }
             self.onController { $0.microphoneSettingChanged() }
             self.publish(nil)
-        }
-    }
-
-    private func makeSwitcher() -> Switcher {
-        Switcher(launch: ProcessLaunchControl(), python: PythonControlSocket(), native: NativeStatusProbe(),
-                 processes: SystemVoiceTypeProcesses(lock: lock), say: { [logFile] in logFile.log($0) })
-    }
-
-    /// From the menu, or `switch python` (SIGUSR2). The controller's whenIdle stops new
-    /// dictations at once, on its own queue, so none can start between the check and the
-    /// switch; one already running finishes first.
-    private func switchToPython(fromCommandLine: Bool) {
-        guard controller != nil else {
-            // Backing off, given up, or waiting for the lock: nothing to wait for.
-            DispatchQueue.global(qos: .userInitiated).async { self.performSwitchToPython(fromCommandLine: fromCommandLine) }
-            return
-        }
-        onController { [weak self] controller in
-            controller.whenIdle("Switching to Python Voice Type") {
-                DispatchQueue.global(qos: .userInitiated).async { self?.performSwitchToPython(fromCommandLine: fromCommandLine) }
-            }
-        }
-    }
-
-    private func performSwitchToPython(fromCommandLine: Bool) {
-        log("Switching to Python Voice Type.")
-        let handover = NativeHandover(switcher: makeSwitcher(), lock: lock,
-                                      stopTap: { [weak self] in self?.tap?.stop() },
-                                      startTap: { [weak self] in DispatchQueue.main.async { self?.startTap() } })
-        switch handover.toPython() {
-        case .handedOver:
-            quitNow("Python Voice Type is starting; Voice Type Native is quitting. Switch back with: voice-type-native switch native")
-        case let .stayed(why):
-            log("Switch to Python failed: \(why)")
-            recordHandoverFailure(why)
-            onController { $0.resumeAfterCancelledStop() }
-            if !fromCommandLine {
-                DispatchQueue.main.async { Self.alert("Couldn't switch to Python Voice Type", why) }
-            }
-        case let .pythonTookOver(why):
-            quitNow("The switch reported a problem (\(why)), but Python Voice Type has the lock, so it's the one in use now; quitting.")
-        }
-    }
-
-    private func switchToNative() {
-        // A hand-opened copy hands over to launchd's, so it stops looking at the lock first.
-        if !supervised { handingOver = true }
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
-            do {
-                try makeSwitcher().switchToNative(fromNativeApp: supervised)
-                if !supervised {
-                    // launchd now runs its own copy; this hand-opened one makes way.
-                    quitNow("Started Voice Type Native's LaunchAgent; quitting this copy so it takes over.")
-                }
-                // launchd's copy keeps looking every 2 s, and now gets it.
-                log("Python Voice Type stopped; taking the lock.")
-            } catch {
-                log("Switch to Voice Type Native failed: \(error.localizedDescription)")
-                DispatchQueue.main.async {
-                    self.handingOver = false
-                    // Pick up where handingOver stopped them (launchd's copy never stopped).
-                    if self.windowOnly { self.watchForLaunchdCopy() } else if !self.supervised { self.tryLock() }
-                    Self.alert("Couldn't switch to Voice Type Native", error.localizedDescription)
-                }
-            }
         }
     }
 

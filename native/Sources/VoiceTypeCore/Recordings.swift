@@ -1,7 +1,7 @@
 import Foundation
 
-/// One dictation the Python app saved: a float WAV plus a JSON file next to it (see
-/// recording_archive.py). Read-only here.
+/// One saved dictation: a float WAV plus a JSON file next to it (see RecordingArchive).
+/// Read-only here.
 public struct SavedRecording: Sendable {
     public var id: String
     public var createdAt: String
@@ -9,15 +9,15 @@ public struct SavedRecording: Sendable {
     public var durationSec: Double
     /// captured, completed, skipped_low_level, flatline_capture, finished_without_text, ...
     public var status: String
-    /// The text the Python app typed, when it typed anything.
+    /// The text that was typed, when anything was.
     public var text: String?
     /// The text before screen-mark markers like "[1]" were added. Same as text without marks.
     public var decodedText: String?
     public var rawTranscript: String?
     public var markCount: Int
 
-    /// What the Python app's text was before anything native doesn't do yet. Markers for
-    /// screen marks arrive in phase 2, so dictations with marks compare without them.
+    /// The saved text as a replay can make it: a replay has no screen marks, so dictations
+    /// with marks compare without their markers.
     public var comparableText: String {
         if markCount > 0, let decodedText { return decodedText }
         return text ?? ""

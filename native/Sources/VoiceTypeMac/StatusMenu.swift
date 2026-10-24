@@ -1,16 +1,14 @@
 import AppKit
 import VoiceTypeCore
 
-/// The menu bar item: what Voice Type is doing, the microphone, permissions, the log, the
-/// switch back to Python, and Quit. Main thread only.
+/// The menu bar item: what Voice Type is doing, the microphone, permissions, the log, and
+/// Quit. Main thread only.
 final class StatusMenu: NSObject, NSMenuDelegate {
     struct Actions {
         var chooseMicrophone: (String) -> Void
         var setEnabled: (Bool) -> Void
         var showPermissions: () -> Void
         var openLog: () -> Void
-        var switchToPython: () -> Void
-        var switchToNative: () -> Void
         var tryAgain: () -> Void
         var quit: () -> Void
     }
@@ -38,7 +36,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         case "recording": symbol = "mic.fill"
         case "finalising": symbol = "ellipsis.circle"
         case "idle": symbol = status.enabled ? "mic" : "mic.slash"
-        case "waiting_for_python": symbol = "mic.slash"
+        case "waiting_for_lock": symbol = "mic.slash"
         case "waiting_for_permission", "needs_model", "needs_attention": symbol = "exclamationmark.triangle"
         default: symbol = "hourglass"
         }
@@ -52,7 +50,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         case "idle": return status.enabled ? "Ready" : "Paused"
         case "recording": return "Recording"
         case "finalising": return "Transcribing"
-        case "waiting_for_python": return "Python Voice Type is running"
+        case "waiting_for_lock": return "Another copy of Voice Type Native is running"
         case "waiting_for_permission": return "Needs Accessibility and Input Monitoring"
         case "needs_model": return "Speech model missing"
         case "stopping": return "Stopping"
@@ -86,8 +84,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
-        let waitingForPython = status.state == "waiting_for_python"
-        if !waitingForPython {
+        // Without the lock this copy has no controller to take a microphone or a pause.
+        if status.state != "waiting_for_lock" {
             let microphones = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
             let submenu = NSMenu()
             let chosen = status.preferredMicrophone
@@ -121,14 +119,6 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         log.target = self
         menu.addItem(log)
         menu.addItem(.separator())
-
-        let switcher = waitingForPython
-            ? NSMenuItem(title: "Switch to Voice Type Native", action: #selector(switchToNative), keyEquivalent: "")
-            : NSMenuItem(title: "Switch to Python Voice Type", action: #selector(switchToPython), keyEquivalent: "")
-        switcher.target = self
-        switcher.isEnabled = status.state != "stopping"
-        menu.addItem(switcher)
-        menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Voice Type Native", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -138,8 +128,6 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     @objc private func toggleEnabled(_ sender: NSMenuItem) { actions.setEnabled(sender.state != .on) }
     @objc private func showPermissions() { actions.showPermissions() }
     @objc private func openLog() { actions.openLog() }
-    @objc private func switchToPython() { actions.switchToPython() }
-    @objc private func switchToNative() { actions.switchToNative() }
     @objc private func tryAgain() { actions.tryAgain() }
     @objc private func quit() { actions.quit() }
 }

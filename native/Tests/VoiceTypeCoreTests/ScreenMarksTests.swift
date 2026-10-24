@@ -295,7 +295,7 @@ struct ScreenshotStoreTests {
         #expect(try Data(contentsOf: URL(fileURLWithPath: recent)) == Data("new png".utf8))
         #expect(FileManager.default.fileExists(atPath: unrelated.path))
         #expect(recent.hasSuffix("_2.png"))
-        // The same names as Python's, so either app cleans up after the other.
+        // The same names as Python's, so screenshots it left are cleaned up too.
         let name = URL(fileURLWithPath: recent).lastPathComponent
         #expect(name.range(of: #"^\d{8}T\d{12}Z_[0-9a-f]{32}_\d+\.png$"#, options: .regularExpression) != nil)
         let attributes = try FileManager.default.attributesOfItem(atPath: recent)

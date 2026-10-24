@@ -112,10 +112,11 @@ public enum AudioGate {
     }
 }
 
-/// Duration, RMS and peak of a clip, computed bit for bit as the Python app does.
+/// Duration, RMS and peak of a clip, computed bit for bit as the Python version did.
 ///
 /// The gates compare these against fixed thresholds, so a clip sitting right on a threshold
-/// has to land on the same side in both apps. Python computes them in float32 with numpy
+/// lands on the same side as it did there, and in the benchmark. Python computed them in
+/// float32 with numpy
 /// (`np.sqrt(np.mean(audio ** 2))` and `np.max(np.abs(audio))`), and numpy sums float32
 /// arrays pairwise, so the RMS here repeats numpy's exact order of additions.
 public struct AudioLevels: Equatable, Sendable {

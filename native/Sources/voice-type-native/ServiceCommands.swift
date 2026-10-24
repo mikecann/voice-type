@@ -2,11 +2,15 @@ import Foundation
 import VoiceTypeCore
 import VoiceTypeMac
 
-/// The commands for running Voice Type rather than testing it: status, switch and restart.
-/// They work without the app, so `switch python` gets you back even when native is broken.
+/// The commands for running Voice Type rather than testing it: status and restart. They
+/// work without the app, so they can say what's wrong, or start it, when it isn't running.
 struct ServiceCommands {
     let options: Options
     let launch = ProcessLaunchControl()
+
+    /// How long `restart` waits for a dictation to finish: they're capped at 120 s and
+    /// finalisation gets a little more.
+    static let busyWaitSeconds = 150.0
 
     private func say(_ text: String) {
         print(text)
@@ -20,24 +24,16 @@ struct ServiceCommands {
     func status() {
         let native = NativeStatus.read()
         let alive = native.map { $0.state != "stopped" && isNative($0.pid) } ?? false
-        func agent(_ label: String) -> String {
-            let loaded = launch.isLoaded(label) ? (launch.isRunning(label) ? "running" : "loaded") : "not loaded"
-            return "\(loaded)\(launch.isDisabled(label) ? ", disabled" : "")"
-        }
-        say("Python agent (\(LaunchAgents.pythonLabel)): \(agent(LaunchAgents.pythonLabel))")
-        say("Native agent (\(LaunchAgents.nativeLabel)): \(agent(LaunchAgents.nativeLabel))")
-        switch PythonControlSocket().activity() {
-        case .notRunning: say("Python Voice Type: not answering")
-        case .idle: say("Python Voice Type: running, idle")
-        case let .busy(what): say("Python Voice Type: running, \(what)")
-        }
+        let label = LaunchAgents.nativeLabel
+        let loaded = launch.isLoaded(label) ? (launch.isRunning(label) ? "running" : "loaded") : "not loaded"
+        say("LaunchAgent (\(label)): \(loaded)\(launch.isDisabled(label) ? ", disabled" : "")")
         guard let native else {
             say("Voice Type Native: no status file at \(NativeStatus.defaultURL.path)")
             exit(1)
         }
         say("Voice Type Native: \(alive ? "running" : "not running") (pid \(native.pid), last update \(native.updatedAt))")
         say("  state: \(native.state)\(native.message.isEmpty ? "" : " (\(native.message.replacingOccurrences(of: "\n", with: " ")))")")
-        say("  model: \(native.modelStatus), hotkey: \(native.hotkeyListener), holds Python's lock: \(native.holdsPythonLock)")
+        say("  model: \(native.modelStatus), hotkey: \(native.hotkeyListener), holds the lock: \(native.holdsLock)")
         say("  microphone: \(native.microphone.isEmpty ? "none yet" : native.microphone) (preferred: \(native.preferredMicrophone.isEmpty ? "System Default" : native.preferredMicrophone))")
         say("  permissions: \(native.permissions.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ", "))")
         say("  clipboard access: \(native.pasteboardAccess)")
@@ -47,55 +43,42 @@ struct ServiceCommands {
         exit(alive && native.isReady ? 0 : 1)
     }
 
-    func switchTo() {
-        guard let target = options.positional.first, ["native", "python"].contains(target) else {
-            fail("switch needs native or python\n\n\(usage)")
-        }
-        let switcher = Switcher(launch: launch, python: PythonControlSocket(), native: NativeStatusProbe(), processes: SystemVoiceTypeProcesses(), say: say)
+    /// Restarts the app once nothing is being dictated, then waits until the new one is
+    /// ready. The app does the waiting itself (on SIGUSR1), so a key press can't slip in
+    /// between a check here and the restart. If launchd isn't running it (Quit from its menu,
+    /// or the agent was never loaded), it's started instead.
+    func restart() {
+        let label = LaunchAgents.nativeLabel
+        let old = NativeStatus.read()
+        let running = old.map { $0.state != "stopped" && isNative($0.pid) } ?? false
+        var done = "Restarted"
         do {
-            if target == "native" {
-                try switcher.switchToNative()
-                say("Waiting for Voice Type Native to be ready...")
-                if waitForReady(newerThan: nil, timeout: 90) {
-                    say("Voice Type Native is ready. Hold F12 or Right Control to dictate.")
-                } else {
-                    say("Voice Type Native hasn't said it's ready yet. `voice-type-native status` shows why (often a permission).")
-                    exit(1)
-                }
-            } else {
-                try switcher.switchToPython()
-                say("Python Voice Type is starting. It takes a few seconds to load its model.")
+            // A disabled agent wouldn't start at login.
+            if launch.isDisabled(label) { try launch.enable(label) }
+            if !launch.isLoaded(label) {
+                say("Starting Voice Type Native...")
+                try LaunchAgents.start(launch)
+                done = "Started"
+            } else if options.force || !running {
+                say("Restarting Voice Type Native now...")
+                try launch.kickstart(label, restart: true)
+            } else if let old {
+                if old.isBusy { say("Waiting for the current dictation to finish...") }
+                kill(old.pid, SIGUSR1)
+                let deadline = Date().addingTimeInterval(Self.busyWaitSeconds)
+                while isNative(old.pid) && Date() < deadline { Thread.sleep(forTimeInterval: 0.25) }
+                if isNative(old.pid) { fail("Voice Type Native (pid \(old.pid)) didn't restart. Try `voice-type-native restart --force`.", code: 1) }
+                // launchd starts it again at once unless it had only just started.
+                if !launch.isRunning(label) { try? launch.kickstart(label, restart: false) }
             }
         } catch {
             fail(error.localizedDescription, code: 1)
         }
-    }
-
-    /// Restarts the app once nothing is being dictated, then waits until the new one is
-    /// ready. The app does the waiting itself (on SIGUSR1), so a key press can't slip in
-    /// between a check here and the restart.
-    func restart() {
-        guard launch.isLoaded(LaunchAgents.nativeLabel) else {
-            fail("Voice Type Native's agent isn't loaded. Use `voice-type-native switch native` to start it.", code: 1)
-        }
-        let old = NativeStatus.read()
-        if options.force || old.map({ $0.state == "stopped" || !isNative($0.pid) }) ?? true {
-            say("Restarting Voice Type Native now...")
-            do { try launch.kickstart(LaunchAgents.nativeLabel, restart: true) } catch { fail(error.localizedDescription, code: 1) }
-        } else if let old {
-            if old.isBusy { say("Waiting for the current dictation to finish...") }
-            kill(old.pid, SIGUSR1)
-            let deadline = Date().addingTimeInterval(Switcher.busyWaitSeconds)
-            while isNative(old.pid) && Date() < deadline { Thread.sleep(forTimeInterval: 0.25) }
-            if isNative(old.pid) { fail("Voice Type Native (pid \(old.pid)) didn't restart. Try `voice-type-native restart --force`.", code: 1) }
-            // launchd starts it again at once unless it had only just started.
-            if !launch.isRunning(LaunchAgents.nativeLabel) { try? launch.kickstart(LaunchAgents.nativeLabel, restart: false) }
-        }
         say("Waiting for Voice Type Native to be ready...")
         if waitForReady(newerThan: old?.pid, timeout: 90) {
-            say("Restarted and ready (pid \(NativeStatus.read()?.pid ?? 0)).")
+            say("\(done) and ready (pid \(NativeStatus.read()?.pid ?? 0)).")
         } else {
-            say("It restarted but isn't ready yet; `voice-type-native status` shows why.")
+            say("It's running but isn't ready yet; `voice-type-native status` shows why.")
             exit(1)
         }
     }

@@ -33,7 +33,7 @@ public final class DictationController: @unchecked Sendable {
         case recording
         /// Saving, transcribing and pasting; key-down is ignored until it's done.
         case finalising
-        /// About to quit, restart or hand over to Python.
+        /// About to quit or restart.
         case stopping
         /// No model file yet.
         case needsModel = "needs_model"
@@ -633,7 +633,7 @@ public final class DictationController: @unchecked Sendable {
     }
 
     /// Runs `work` once nothing is being dictated, with the phase set to stopping so no new
-    /// dictation starts. For a restart, or handing over to Python.
+    /// dictation starts. For a restart, Quit, or launchd stopping the app.
     public func whenIdle(_ label: String, _ work: @escaping () -> Void) {
         switch phase {
         case .idle, .starting, .needsModel:
@@ -647,12 +647,6 @@ public final class DictationController: @unchecked Sendable {
         case .stopping:
             break
         }
-    }
-
-    /// Back to normal after a hand-over that didn't happen.
-    public func resumeAfterCancelledStop() {
-        guard phase == .stopping else { return }
-        beginPreparation(reason: "the switch didn't happen", warmUp: false)
     }
 
     private func runPendingIdleWork() {

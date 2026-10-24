@@ -88,6 +88,21 @@ struct SettingsTests {
         #expect(try settings(#"{"vocabulary": "abA"}"#).vocabularyPrompt == "a, b.")
     }
 
+    @Test func keysOnlyThePythonVersionUsedAreIgnored() throws {
+        // Older settings.json files still have them. They stay in the file and change nothing.
+        let old = #"""
+        {"final_model": "large-v3-turbo", "stream_model": "small.en", "output_mode": "type", "formatter_enabled": true,
+         "formatter_model": "qwen3", "formatter_system_prompt": {"odd": 1}, "vocabulary": ["Convex"], "corrections": {"congress": "Convex"}}
+        """#
+        let plain = #"{"vocabulary": ["Convex"], "corrections": {"congress": "Convex"}}"#
+        #expect(try settings(old).vocabularyPrompt == settings(plain).vocabularyPrompt)
+        #expect(try settings(old).corrections.pairs.map(\.wrong) == ["congress"])
+        let file = SettingsFile(url: URL(fileURLWithPath: "/tmp/settings.json"), json: try OrderedJSONParser.parse(Data(old.utf8)))
+        #expect(file.microphoneName == SettingsFile.defaultMicrophoneName)
+        #expect(file.markerTimings == .accurate)
+        #expect(file.json["formatter_model"] == .string("qwen3"))
+    }
+
     @Test func nonStringCorrectionValuesAreSkipped() throws {
         let s = try settings(#"{"corrections": {"a": 1, "b": "B"}}"#)
         #expect(s.corrections.pairs.map(\.wrong) == ["b"])

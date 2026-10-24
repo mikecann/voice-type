@@ -2,9 +2,10 @@ import Foundation
 
 /// Writes JSON the way Python's json module does, byte for byte.
 ///
-/// The recordings, the history and settings.json are shared with the Python app, and the
-/// benchmark diffs them, so native has to write the same bytes Python would: the same
-/// indentation and separators, the same string escapes, and floats in Python's repr form.
+/// The recordings, the history and settings.json are in the formats the Python version
+/// wrote, which the benchmark diffs and older files already use, so native writes the same
+/// bytes Python would: the same indentation and separators, the same string escapes, and
+/// floats in Python's repr form.
 public enum PythonJSON {
     /// `json.dumps(value, ensure_ascii=..., indent=indent)`. With no indent this is the compact
     /// default, which still puts a space after "," and ":".

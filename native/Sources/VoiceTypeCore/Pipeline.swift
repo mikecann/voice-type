@@ -72,7 +72,7 @@ public struct DictationResult: Sendable {
         case finishedWithoutText = "finished_without_text"
         case completed
 
-        /// The status the Python app writes to a recording's JSON for the same outcome. The
+        /// The status the Python version wrote to a recording's JSON for the same outcome. The
         /// near-silence gate's skips are recorded like the short-clip gate's, since they're
         /// the same kind of outcome to anything reading the archive.
         public var pythonStatus: String {

@@ -1,7 +1,7 @@
 import Foundation
 
-/// The dictation audio and metadata the Python app keeps for 30 days, ported from
-/// recording_archive.py so both apps write the same files.
+/// The dictation audio and metadata kept for 30 days, ported from the Python version's
+/// recording_archive.py, so the files are the same as the ones it wrote.
 ///
 /// Each recording is a mono 32-bit float WAV (format 3 with a fact chunk, so a replay sees
 /// exactly what Whisper saw; PCM16 would quantise quiet clips) and a JSON file next to it,

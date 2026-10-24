@@ -1,2 +1,0 @@
-# Tests use fake audio/model backends; no model downloads or GPU required.
-numpy>=1.26,<3

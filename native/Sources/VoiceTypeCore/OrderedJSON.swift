@@ -2,9 +2,9 @@ import Foundation
 
 /// A parsed JSON value that keeps object keys in file order.
 ///
-/// Foundation's JSONSerialization hands back an unordered dictionary, but the Python app
-/// applies corrections in the order settings.json lists them, and one correction can feed
-/// the next. Keeping the order is the only way to type the same text.
+/// Foundation's JSONSerialization hands back an unordered dictionary, but corrections apply
+/// in the order settings.json lists them (as they did in the Python version), and one
+/// correction can feed the next. Keeping the order is the only way to type the same text.
 public indirect enum JSONValue: Equatable, Sendable {
     case null
     case bool(Bool)

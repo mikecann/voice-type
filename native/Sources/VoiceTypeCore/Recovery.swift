@@ -1,7 +1,7 @@
 import Foundation
 
 // How the app keeps itself alive without looping: a backoff on exit-75 restarts, a watchdog on
-// the controller's queue, and the rules for when a copy of the app may take Python's lock.
+// the controller's queue, and the rules for when a copy of the app may take the instance lock.
 
 /// The restarts native has made for failures (a watchdog, a hung Core Audio call, a model that
 /// wouldn't load), in `native-restarts.json` in the data folder, so the next launch knows. A
@@ -142,17 +142,12 @@ public final class StallDetector: @unchecked Sendable {
     private func answered() { lock.withLock { outstanding = nil } }
 }
 
-/// When a copy of the native app may take Python's lock (and so the hotkey).
+/// When a copy of the app may take the instance lock (and so the hotkey).
 ///
-/// Only one native copy should ever dictate: launchd's. One opened by hand (Finder, Spotlight,
-/// the first-run step) used to poll for the lock every second while Python held it, so after a
-/// wake, when Python exits 75 and relaunches, it could grab the lock in the gap; Python's new
-/// worker then saw a fresh heartbeat and exited 0, which its KeepAlive doesn't restart, leaving
-/// Python dead while its agent was still the enabled one. So a hand-opened copy never takes the
-/// lock when the LaunchAgent is installed: with native chosen it starts launchd's copy and
-/// quits; with Python chosen it's just the permissions window and the switch. And launchd's
-/// copy doesn't take the lock while Python's agent is still enabled and launchd is running it
-/// or bringing it back, since that Python is the one in use.
+/// The copy that dictates should be launchd's, so crashes, watchdogs and `restart` all bring it
+/// back the same way. A copy opened by hand (Finder, Spotlight) while the LaunchAgent is
+/// installed starts launchd's copy and quits, rather than dictating itself; one opened while
+/// another copy is running just quits. Without a LaunchAgent, a hand-opened copy dictates.
 public enum LockPolicy {
     public struct Situation: Equatable, Sendable {
         /// Started by launchd from native's agent.
@@ -160,20 +155,14 @@ public enum LockPolicy {
         /// A hand-opened copy relaunching itself after exiting 75 (only without an agent).
         public var relaunched: Bool
         public var nativeAgentInstalled: Bool
-        public var nativeAgentEnabled: Bool
-        /// Python's agent is enabled and launchd is running it or will bring it back.
-        public var pythonAgentActive: Bool
         public var holder: LockHolder
         public var holderAlive: Bool
         public var ownPID: Int32
 
-        public init(supervised: Bool, relaunched: Bool, nativeAgentInstalled: Bool, nativeAgentEnabled: Bool, pythonAgentActive: Bool,
-                    holder: LockHolder, holderAlive: Bool, ownPID: Int32) {
+        public init(supervised: Bool, relaunched: Bool, nativeAgentInstalled: Bool, holder: LockHolder, holderAlive: Bool, ownPID: Int32) {
             self.supervised = supervised
             self.relaunched = relaunched
             self.nativeAgentInstalled = nativeAgentInstalled
-            self.nativeAgentEnabled = nativeAgentEnabled
-            self.pythonAgentActive = pythonAgentActive
             self.holder = holder
             self.holderAlive = holderAlive
             self.ownPID = ownPID
@@ -187,10 +176,8 @@ public enum LockPolicy {
         case wait(String)
         /// Another native copy has it; this one makes way.
         case quit(String)
-        /// Hand-opened while native is the chosen app: start launchd's copy, then quit.
+        /// Opened by hand with the LaunchAgent installed: start launchd's copy, then quit.
         case startAgentAndQuit
-        /// Hand-opened while Python is the chosen app: permissions and the switch only.
-        case uiOnly
     }
 
     public static func plan(_ s: Situation) -> Plan {
@@ -202,12 +189,7 @@ public enum LockPolicy {
             }
             return .quit("Voice Type Native is already running (pid \(pid)); quitting this copy.")
         }
-        if !s.supervised && !s.relaunched && s.nativeAgentInstalled {
-            return s.nativeAgentEnabled ? .startAgentAndQuit : .uiOnly
-        }
-        if s.supervised && s.pythonAgentActive {
-            return .wait("Python Voice Type's LaunchAgent is still enabled, so it keeps the hotkey. Use Switch to Voice Type Native to take over.")
-        }
+        if !s.supervised && !s.relaunched && s.nativeAgentInstalled { return .startAgentAndQuit }
         return .take
     }
 }

@@ -1,6 +1,7 @@
 import Foundation
 
-/// Where the Python app keeps its data, which native shares.
+/// Where Voice Type keeps its data: the folder the Python version used, so its settings,
+/// recordings and history carry on.
 public enum VoiceTypePaths {
     /// `$VOICE_TYPE_DATA_DIR`, or ~/Library/Application Support/Voice Type, as in voice-type.py.
     public static var dataDirectory: URL {
@@ -49,7 +50,7 @@ public struct VoiceTypeSettings {
     }
 
     public static func parse(_ json: JSONValue) -> VoiceTypeSettings {
-        // A top-level value that isn't an object would crash the Python app on startup.
+        // A top-level value that isn't an object would have crashed the Python version on startup.
         // Treat it like an empty file instead.
         let vocabulary: [String]?
         switch json["vocabulary"] {

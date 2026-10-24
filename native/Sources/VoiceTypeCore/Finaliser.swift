@@ -307,7 +307,8 @@ public final class Finaliser: @unchecked Sendable {
     ///
     /// The words' times come from a timing-only pass with whisper.cpp's DTW alignment, which
     /// put markers after the same word as Python's mlx-whisper timings 91% of the time on
-    /// saved dictations (scripts/marker-check.py). Without it ("marker_timings": "rough",
+    /// saved dictations (scripts/marker-check.py, which went with the Python version after
+    /// commit 17e8220). Without it ("marker_timings": "rough",
     /// no timing engine, or a pass that ran out of time), the final pass's own token
     /// timestamps, which only managed 40%.
     ///

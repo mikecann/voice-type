@@ -7,8 +7,8 @@ public protocol ScreenshotStoring: AnyObject, Sendable {
 }
 
 /// Annotated mark screenshots in `screenshots/`, deleted after a week. Ported from
-/// ScreenshotStore in screen_marks.py, with the same file names, so either app cleans up the
-/// other's. Like the recording archive, the capture time is in the name, so cleanup doesn't
+/// ScreenshotStore in screen_marks.py, with the same file names, so screenshots the Python
+/// version left are cleaned up too. Like the recording archive, the capture time is in the name, so cleanup doesn't
 /// trust mutable mtimes, and files it didn't write are never touched.
 public final class ScreenshotStore: ScreenshotStoring, @unchecked Sendable {
     public let directory: URL

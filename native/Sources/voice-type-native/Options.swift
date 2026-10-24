@@ -8,18 +8,17 @@ let usage = """
       transcribe FILE.wav     print the text Voice Type would type for a recording
       serve                   answer whispercpp-bench's line protocol on stdin/stdout
       replay --since DATE     rerun saved recordings (UTC date, e.g. 2026-10-20) and print
-                              where the text differs from what the Python app typed
+                              where the text differs from what was typed at the time
       tokens                  show the word list prompt's tokens, ours and whisper.cpp's
       composite IN.png OUT.png --rect X,Y,W,H [--marks FILE.json]
                               draw screen marks onto a capture the way the app does
                               (marks: [{"number": 1, "points": [[x, y], ...]}], in points)
 
     running the app (these never need the app to be working):
-      status                  what Voice Type Native and the Python app are doing
-      switch native|python    hand the hotkey to one app: waits for the other to finish
-                              any dictation, then flips their LaunchAgents
-      restart                 restart Voice Type Native once it's idle, and wait until
-                              it's ready again (--force restarts straight away)
+      status                  what Voice Type Native is doing
+      restart                 restart Voice Type Native once it's idle (or start it if
+                              it isn't running), and wait until it's ready again
+                              (--force restarts straight away)
       launch-agent-plist EXE  print the LaunchAgent for an installed app (build script)
 
     options:

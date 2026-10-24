@@ -89,17 +89,6 @@ struct LaunchctlParsingTests {
     }
 }
 
-struct LaunchctlPrintTests {
-    @Test func knowsWhenLaunchdWillBringAJobBack() {
-        #expect(ProcessLaunchControl.willRun(inPrintOutput: "\tstate = running\n\tlast exit code = 75\n"))
-        // Exited 75: KeepAlive restarts it after the throttle.
-        #expect(ProcessLaunchControl.willRun(inPrintOutput: "\tstate = not running\n\tlast exit code = 75\n"))
-        // Quit, or a duplicate that exited 0: it stays down.
-        #expect(!ProcessLaunchControl.willRun(inPrintOutput: "\tstate = not running\n\tlast exit code = 0\n"))
-        #expect(ProcessLaunchControl.willRun(inPrintOutput: "\tstate = not running\n\tlast exit code = (never exited)\n"))
-    }
-}
-
 private extension Double {
     var float: Float { Float(self) }
 }

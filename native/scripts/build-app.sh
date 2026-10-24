@@ -4,9 +4,9 @@
 #   native/scripts/build-app.sh
 #       Builds, signs with the Apple Development identity, installs to ~/Applications,
 #       copies the speech model into place if it's missing, writes the LaunchAgent, and
-#       links voice-type-native into ~/.local/bin. If native is the Voice Type in use, it
-#       restarts it into the new build once it's idle. If Python is in use, it leaves Python
-#       alone and tells you how to switch.
+#       links voice-type-native into ~/.local/bin. Then it makes sure the LaunchAgent is
+#       enabled and running: a running app restarts into the new build once it's idle, and
+#       one that isn't running (or has never been installed) is started.
 #
 #   native/scripts/build-app.sh --test-build DIR
 #       FOR TESTING ONLY. Builds and ad hoc signs the app into DIR and writes the LaunchAgent
@@ -223,40 +223,27 @@ if [[ -d "$HOME/.local/bin" ]]; then
   say "Linked ~/.local/bin/voice-type-native"
 fi
 
-# Exactly one Voice Type may start at login. Which one is in use is what `switch` left in
-# launchctl's enabled/disabled overrides, not whether native happens to be running: Quit from
-# its menu stops it but leaves it the chosen app.
-#   native in use:  Python disabled, native not disabled
-#   Python in use:  Python not disabled (native gets disabled, if it wasn't)
-#   neither:        both disabled, e.g. by an older build of this script; left alone
-PY_LABEL="com.mikerosoft.voice-type"
+# The agent should always be enabled, so the app starts at login. Older builds disabled it
+# to hand the hotkey to the Python version.
 overrides="$(launchctl print-disabled "$domain" 2>/dev/null || true)"
-is_disabled() {
-  # `"label" => disabled` on current macOS, `=> true` on older ones.
-  grep -qF "\"$1\" => disabled" <<<"$overrides" || grep -qF "\"$1\" => true" <<<"$overrides"
-}
-python_disabled=0; native_disabled=0
-if is_disabled "$PY_LABEL"; then python_disabled=1; fi
-if is_disabled "$LABEL"; then native_disabled=1; fi
-
-if [[ "$python_disabled" == 1 && "$native_disabled" == 0 ]]; then
-  if launchctl print "$domain/$LABEL" 2>/dev/null | grep -q "state = running"; then
-    say "Restarting Voice Type Native into the new build once it's idle..."
-    "$executable" restart
-  else
-    say ""
-    say "Built and installed. Voice Type Native is the one in use, but it isn't running (quit from its menu?)."
-    say "To start it:      $executable switch native"
-  fi
-elif [[ "$python_disabled" == 1 && "$native_disabled" == 1 ]]; then
-  say ""
-  say "Built and installed. Both Voice Type agents are disabled, so neither starts at login."
-  say "To use native:    $executable switch native"
-  say "To use Python:    $executable switch python"
-else
-  [[ "$native_disabled" == 1 ]] || launchctl disable "$domain/$LABEL"
-  say ""
-  say "Built and installed. Python Voice Type is still the one in use."
-  say "To switch:        $executable switch native"
-  say "To switch back:   voice-type-native switch python   (or Switch to Python Voice Type in the menu)"
+# `"label" => disabled` on current macOS, `=> true` on older ones.
+if grep -qF "\"$LABEL\" => disabled" <<<"$overrides" || grep -qF "\"$LABEL\" => true" <<<"$overrides"; then
+  say "Enabling the LaunchAgent..."
+  launchctl enable "$domain/$LABEL"
 fi
+
+# Read into a variable rather than piped into grep -q, which can kill launchctl with SIGPIPE
+# and so fail the pipeline under pipefail even when the line is there.
+if ! agent="$(launchctl print "$domain/$LABEL" 2>/dev/null)"; then
+  say "Starting Voice Type Native..."
+  launchctl bootstrap "$domain" "$plist"
+elif grep -qF "state = running" <<<"$agent"; then
+  say "Restarting Voice Type Native into the new build once it's idle..."
+  "$executable" restart
+else
+  # Loaded but not running: quit from its menu, say.
+  say "Starting Voice Type Native..."
+  launchctl kickstart "$domain/$LABEL"
+fi
+say ""
+say "Built and installed. Hold F12 or Right Control to dictate; \`voice-type-native status\` shows what it's doing."

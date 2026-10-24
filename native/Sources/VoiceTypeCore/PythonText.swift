@@ -1,6 +1,6 @@
 // Small pieces of Python's str behaviour that the ported logic leans on.
 //
-// The Python app strips and splits text with str.strip() and str.split(), which treat a
+// The Python version stripped and split text with str.strip() and str.split(), which treat a
 // slightly different set of characters as whitespace than Foundation does (the ASCII
 // separators 0x1C to 0x1F count, for one). Using the same set keeps word counts in the loop
 // guard and the cleaned word list identical.

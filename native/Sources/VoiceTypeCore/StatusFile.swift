@@ -1,19 +1,20 @@
 import Foundation
 
 /// `native-status.json` in the data folder: what the running app is doing, for the command
-/// line (`status`, `restart`, `switch`) and anything else that wants to know without a
-/// socket. Rewritten atomically whenever something changes.
+/// line (`status`, `restart`) and anything else that wants to know. Rewritten atomically
+/// whenever something changes.
 public struct NativeStatus: Codable, Equatable, Sendable {
     public var pid: Int32
-    /// starting, idle, recording, finalising, waiting_for_python, waiting_for_permission,
-    /// needs_model, stopping, retrying (backing off after restarts), needs_attention (gave up
-    /// after too many restarts), stopped
+    /// starting, idle, recording, finalising, waiting_for_lock (another copy has it; only in
+    /// the menu, since the file is that copy's), waiting_for_permission, needs_model, stopping, retrying (backing off after restarts),
+    /// needs_attention (gave up after too many restarts), stopped
     public var state: String
     public var message: String
     public var enabled: Bool
     public var modelStatus: String
     public var hotkeyListener: String
-    public var holdsPythonLock: Bool
+    /// Holds voice-type.instance.lock, so this is the copy that dictates.
+    public var holdsLock: Bool
     public var microphone: String
     public var preferredMicrophone: String
     public var finalizeInFlight: Bool
@@ -24,19 +25,6 @@ public struct NativeStatus: Codable, Equatable, Sendable {
     public var lastDictation: LastDictation?
     public var version: String
     public var updatedAt: String
-    /// Set when a hand-over to Python that `switch python` asked for didn't happen.
-    public var handoverFailure: HandoverFailure?
-
-    public struct HandoverFailure: Codable, Equatable, Sendable {
-        /// Seconds since 1970, so the command line can tell it's about its own request.
-        public var at: Double
-        public var message: String
-
-        public init(at: Double, message: String) {
-            self.at = at
-            self.message = message
-        }
-    }
 
     public struct LastDictation: Codable, Equatable, Sendable {
         public var at: String
@@ -55,7 +43,7 @@ public struct NativeStatus: Codable, Equatable, Sendable {
     }
 
     public init(pid: Int32, state: String, message: String = "", enabled: Bool = true, modelStatus: String = "not-started",
-                hotkeyListener: String = "not-started", holdsPythonLock: Bool = false, microphone: String = "",
+                hotkeyListener: String = "not-started", holdsLock: Bool = false, microphone: String = "",
                 preferredMicrophone: String = "", finalizeInFlight: Bool = false, permissions: [String: String] = [:],
                 pasteboardAccess: String = "unknown", lastDictation: LastDictation? = nil, version: String = "", updatedAt: String = "") {
         self.pid = pid
@@ -64,7 +52,7 @@ public struct NativeStatus: Codable, Equatable, Sendable {
         self.enabled = enabled
         self.modelStatus = modelStatus
         self.hotkeyListener = hotkeyListener
-        self.holdsPythonLock = holdsPythonLock
+        self.holdsLock = holdsLock
         self.microphone = microphone
         self.preferredMicrophone = preferredMicrophone
         self.finalizeInFlight = finalizeInFlight
@@ -79,24 +67,25 @@ public struct NativeStatus: Codable, Equatable, Sendable {
         case pid, state, message, enabled, permissions, version
         case modelStatus = "model_status"
         case hotkeyListener = "hotkey_listener"
-        case holdsPythonLock = "holds_python_lock"
+        // Named from when the lock was shared with the Python version. Kept, so a running
+        // app and a newer command line (the build script's restart) still read each other.
+        case holdsLock = "holds_python_lock"
         case microphone
         case preferredMicrophone = "preferred_microphone"
         case finalizeInFlight = "finalize_in_flight"
         case pasteboardAccess = "pasteboard_access"
         case lastDictation = "last_dictation"
         case updatedAt = "updated_at"
-        case handoverFailure = "handover_failure"
     }
 
     public static var defaultURL: URL { VoiceTypePaths.dataDirectory.appendingPathComponent("native-status.json") }
 
     /// Ready for a dictation, which is what `restart` waits for.
     public var isReady: Bool {
-        state == "idle" && modelStatus == "ready" && hotkeyListener == "event-tap" && holdsPythonLock
+        state == "idle" && modelStatus == "ready" && hotkeyListener == "event-tap" && holdsLock
     }
 
-    /// Mid-dictation, so switching or restarting has to wait.
+    /// Mid-dictation, so restarting has to wait.
     public var isBusy: Bool { state == "recording" || state == "finalising" || finalizeInFlight }
 
     public func write(to url: URL = NativeStatus.defaultURL) throws {
@@ -107,40 +96,6 @@ public struct NativeStatus: Codable, Equatable, Sendable {
 
     public static func read(from url: URL = NativeStatus.defaultURL) -> NativeStatus? {
         (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode(NativeStatus.self, from: $0) }
-    }
-
-    /// What the file says the app is doing, or not running if its pid has gone (or is now
-    /// some other program's).
-    public static func activity(from url: URL = NativeStatus.defaultURL, isAlive: (Int32) -> Bool = { ProcessLookup.isVoiceTypeNative(pid: $0) }) -> PeerActivity {
-        guard let status = read(from: url), status.state != "stopped", isAlive(status.pid) else { return .notRunning }
-        return status.isBusy ? .busy(status.state) : .idle
-    }
-}
-
-/// The running native app as the command line's switching sees it: its status file, checked
-/// against the process, and SIGUSR2 to ask it to hand over to Python itself.
-public final class NativeStatusProbe: NativeAppProbe {
-    let url: URL
-    let isNative: (Int32) -> Bool
-
-    public init(url: URL = NativeStatus.defaultURL, isNative: @escaping (Int32) -> Bool = { ProcessLookup.isVoiceTypeNative(pid: $0) }) {
-        self.url = url
-        self.isNative = isNative
-    }
-
-    public func runningPID() -> Int32? {
-        guard let status = NativeStatus.read(from: url), status.state != "stopped", isNative(status.pid) else { return nil }
-        return status.pid
-    }
-
-    public func activity() -> PeerActivity { NativeStatus.activity(from: url, isAlive: isNative) }
-
-    public func requestHandover(pid: Int32) { kill(pid, SIGUSR2) }
-
-    public func handoverFailure(pid: Int32, since: Date) -> String? {
-        guard let status = NativeStatus.read(from: url), status.pid == pid, let failure = status.handoverFailure,
-              failure.at >= since.timeIntervalSince1970 - 1 else { return nil }
-        return failure.message
     }
 }
 

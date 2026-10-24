@@ -106,7 +106,7 @@ final class KeyboardTap: @unchecked Sendable {
                        armWatchdog: { watchdog.arm() })
     }
 
-    /// Turns the tap off for good, before the lock goes to Python.
+    /// Turns the tap off for good, before the app quits.
     func stop() {
         guard let loop = runLoop, let port else { return }
         drawing?.reset()

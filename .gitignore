@@ -1,6 +1,4 @@
 __pycache__/
-*.py[cod]
-.venv/
 .env
 .env.*
 !.env.example
@@ -9,17 +7,13 @@ __pycache__/
 build/
 dist/
 node_modules/
-*.exe
-*.dll
 *.log
-*.sock
-*.heartbeat
+# Voice Type's runtime files, in case $VOICE_TYPE_DATA_DIR points into the repo.
 *.instance.lock
 settings.json
 settings.json.*.tmp
 transcription-history.jsonl*
 recordings/
-trusted-launcher-path
-# Test fixtures written by Python's own code, which the native tests compare against.
+# Test fixtures the Python version's own code wrote, which the native tests compare against.
 !native/Tests/VoiceTypeCoreTests/Fixtures/python/settings.json
 !native/Tests/VoiceTypeCoreTests/Fixtures/python/transcription-history.jsonl

@@ -130,7 +130,7 @@ public final class WhisperEngine: DictationEngine {
         p.no_speech_thold = 0.6
         p.detect_language = false
         if beam > 0 { p.beam_search.beam_size = Int32(beam) }
-        // Past 30 s, Python transcribes each window-sized piece separately (split_at_pauses)
+        // Past 30 s, Python transcribed each window-sized piece separately (split_at_pauses)
         // because mlx only gives the first window the word list. carry_initial_prompt gives
         // every window the word list. whisper.cpp still feeds each window the previous one's
         // text too, even with no_context. Cutting that out (n_max_text_ctx at the prompt's

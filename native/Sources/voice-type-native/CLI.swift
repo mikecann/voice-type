@@ -129,9 +129,9 @@ struct CLI {
 
     // MARK: replay
 
-    /// Reruns saved recordings and prints each one whose text differs from what the Python
-    /// app typed. The Python app ran mlx-whisper, so differences are expected; this is for
-    /// finding them, not a pass or fail.
+    /// Reruns saved recordings and prints each one whose text differs from what was typed
+    /// when it was recorded. Older recordings are the Python version's, which ran
+    /// mlx-whisper, so differences are expected; this is for finding them, not a pass or fail.
     func replay() {
         guard let since = options.since else { fail("replay needs --since DATE\n\n\(usage)") }
         let recordings: [SavedRecording]
@@ -144,7 +144,7 @@ struct CLI {
         var same = 0, different = 0, skipped = 0
         var results: [String: Any] = [:]
         for recording in recordings {
-            // "captured" means Python was still finishing it, or crashed before it did.
+            // "captured" means the app was still finishing it, or crashed before it did.
             guard recording.status != "captured" else { skipped += 1; continue }
             let samples: [Float]
             do { samples = try WAVReader.read(recording.audioURL) } catch {
@@ -152,7 +152,7 @@ struct CLI {
                 skipped += 1
                 continue
             }
-            let python = recording.comparableText
+            let saved = recording.comparableText
             let result: DictationResult
             do { result = try process(samples, with: pipeline) } catch {
                 print("\(recording.id): \(error.localizedDescription)")
@@ -160,20 +160,20 @@ struct CLI {
                 continue
             }
             results[recording.id] = [
-                "python": python,
+                "saved": saved,
                 "native": result.text,
-                "python_status": recording.status,
+                "saved_status": recording.status,
                 "native_status": result.status.pythonStatus,
                 "seconds": result.levels.durationSec,
             ]
-            if python == result.text {
+            if saved == result.text {
                 same += 1
                 continue
             }
             different += 1
             let marks = recording.markCount > 0 ? ", marks left out" : ""
             print(String(format: "%@  %.1f s%@", recording.id, result.levels.durationSec, marks))
-            print("  python (\(recording.status)): \(python)")
+            print("  saved  (\(recording.status)): \(saved)")
             print("  native (\(result.status.pythonStatus)): \(result.text)")
             // stdout is block-buffered when it goes to a file, and a long replay should
             // show its progress as it goes.

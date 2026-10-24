@@ -2,8 +2,10 @@ import Foundation
 import Testing
 @testable import VoiceTypeCore
 
-/// The Python app's own files, written by native/scripts/make-python-fixtures.py with the
-/// real recording_archive.py, transcription_history.py and json.dump.
+/// Files the Python version's own code wrote (recording_archive.py, transcription_history.py
+/// and json.dump), so native is checked against the real thing byte for byte. The Python
+/// version, and the script that made these, were removed after commit 17e8220; check that
+/// commit out to regenerate them.
 func pythonFixture(_ name: String) throws -> Data {
     let url = try #require(Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "Fixtures/python"))
     return try Data(contentsOf: url)

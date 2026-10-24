@@ -754,44 +754,30 @@ struct InstanceLockTests {
         let dir = try temporaryDirectory("lock")
         defer { try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("voice-type.instance.lock")
-        let first = InstanceLock(url: url, heartbeatURL: dir.appendingPathComponent("hb"))
-        let second = InstanceLock(url: url, heartbeatURL: dir.appendingPathComponent("hb"))
+        let first = InstanceLock(url: url)
+        let second = InstanceLock(url: url)
         #expect(first.tryAcquire(pid: 1234))
         #expect(!second.tryAcquire())
         #expect(second.recordedPID() == 1234)
-        first.touchHeartbeat(now: Date(timeIntervalSince1970: 5))
-        #expect(String(decoding: try Data(contentsOf: dir.appendingPathComponent("hb")), as: UTF8.self) == "5.0")
         first.release()
         #expect(second.tryAcquire(pid: 99))
         #expect(second.recordedPID() == 99)
     }
 
-    @Test func pythonsFlockSeesNativesLock() throws {
-        let dir = try temporaryDirectory("lock")
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let url = dir.appendingPathComponent("voice-type.instance.lock")
-        let lock = InstanceLock(url: url, heartbeatURL: dir.appendingPathComponent("hb"))
-        #expect(lock.tryAcquire())
-        // What voice-type.py does at import: open "a+" and flock(LOCK_EX | LOCK_NB).
-        let fd = open(url.path, O_RDWR | O_CREAT | O_APPEND, 0o644)
-        defer { close(fd) }
-        #expect(flock(fd, LOCK_EX | LOCK_NB) != 0)
-    }
-
-    @Test func tellsNativeFromPython() {
+    @Test func tellsNativeFromAnythingElse() {
         #expect(LockHolder.identify(pid: 5, executablePath: { _ in "/Users/x/Applications/Voice Type Native.app/Contents/MacOS/voice-type-native" }) == .native(pid: 5))
-        #expect(LockHolder.identify(pid: 5, executablePath: { _ in "/Users/x/Library/Application Support/Voice Type/.venv/bin/Voice Type" }) == .python(pid: 5))
-        #expect(LockHolder.identify(pid: nil) == .python(pid: nil))
+        // The pid has been reused by something else since.
+        #expect(LockHolder.identify(pid: 5, executablePath: { _ in "/usr/bin/vim" }) == .other(pid: 5))
+        #expect(LockHolder.identify(pid: 5, executablePath: { _ in nil }) == .other(pid: 5))
+        #expect(LockHolder.identify(pid: nil) == .other(pid: nil))
     }
 }
 
 final class FakeLaunchControl: LaunchControl {
-    let python = LaunchAgents.pythonLabel
     let native = LaunchAgents.nativeLabel
     var loaded: Set<String>
     var disabled: Set<String>
     var calls: [String] = []
-    var failBootstrapOf: String?
 
     init(loaded: Set<String>, disabled: Set<String>) {
         self.loaded = loaded
@@ -801,297 +787,46 @@ final class FakeLaunchControl: LaunchControl {
     func isLoaded(_ label: String) -> Bool { loaded.contains(label) }
     func isDisabled(_ label: String) -> Bool { disabled.contains(label) }
     func enable(_ label: String) throws { calls.append("enable \(label)"); disabled.remove(label) }
-    func disable(_ label: String) throws { calls.append("disable \(label)"); disabled.insert(label) }
     func bootstrap(_ plist: URL) throws {
         let label = plist.deletingPathExtension().lastPathComponent
-        if failBootstrapOf == label { throw SwitchError("bootstrap failed") }
         calls.append("bootstrap \(label)")
         loaded.insert(label)
     }
-    func bootout(_ label: String) throws { calls.append("bootout \(label)"); loaded.remove(label) }
     func kickstart(_ label: String, restart: Bool) throws { calls.append("kickstart\(restart ? " -k" : "") \(label)") }
 }
 
-final class FakePythonProbe: PythonVoiceTypeProbe {
-    var answers: [PeerActivity]
-    /// Whether it's taking dictations.
-    var enabled = true
-    var onEvent: (String) -> Void = { _ in }
-    private(set) var pauses = 0
-    private(set) var resumes = 0
-    init(_ answers: [PeerActivity]) { self.answers = answers }
-    func activity() -> PeerActivity {
-        let answer = answers.count > 1 ? answers.removeFirst() : answers[0]
-        onEvent("activity \(answer)")
-        return answer
-    }
-    func pauseIfIdle() -> PythonPause {
-        let answer = activity()
-        if case let .busy(what) = answer { return .busy(what) }
-        if answer == .notRunning { return .notRunning }
-        guard enabled else { return .alreadyPaused }
-        enabled = false
-        pauses += 1
-        onEvent("pause")
-        return .paused
-    }
-    func resume() {
-        resumes += 1
-        enabled = true
-        onEvent("resume")
-    }
-}
-
-final class FakeNativeProbe: NativeAppProbe {
-    var pid: Int32?
-    var busy: PeerActivity = .idle
-    var failure: String?
-    var onHandover: () -> Void = {}
-    private(set) var handovers: [Int32] = []
-    func runningPID() -> Int32? { pid }
-    func activity() -> PeerActivity { pid == nil ? .notRunning : busy }
-    func requestHandover(pid: Int32) {
-        handovers.append(pid)
-        onHandover()
-    }
-    func handoverFailure(pid: Int32, since: Date) -> String? { failure }
-}
-
-final class FakeProcesses: VoiceTypeProcesses {
-    var holder: LockHolder = .nobody
-    var alive: Set<Int32> = []
-    var pythonWorkers: Set<Int32> = []
-    /// Who really has the flock; free once that process is gone.
-    var lockedBy: Int32?
-    var exitsOnTerminate = true
-    private(set) var terminated: [Int32] = []
-    private(set) var killed: [Int32] = []
-    func lockHolder() -> LockHolder { holder }
-    func lockIsFree() -> Bool { lockedBy.map { !alive.contains($0) } ?? true }
-    func isAlive(_ pid: Int32) -> Bool { alive.contains(pid) }
-    func isPythonWorker(_ pid: Int32) -> Bool { pythonWorkers.contains(pid) }
-    func terminate(_ pid: Int32) {
-        terminated.append(pid)
-        if exitsOnTerminate { alive.remove(pid) }
-    }
-    func forceKill(_ pid: Int32) {
-        killed.append(pid)
-        alive.remove(pid)
-    }
-}
-
-struct SwitcherTests {
-    let py = LaunchAgents.pythonLabel
+struct LaunchAgentTests {
     let native = LaunchAgents.nativeLabel
+    var plist: URL { URL(fileURLWithPath: "/LA/\(native).plist") }
 
-    func switcher(_ launch: LaunchControl, python: FakePythonProbe = FakePythonProbe([.idle]), app: FakeNativeProbe = FakeNativeProbe(),
-                  processes: FakeProcesses = FakeProcesses(), plistProblem: String? = nil, said: @escaping (String) -> Void = { _ in }) -> Switcher {
-        let clock = ManualExecutor()
-        return Switcher(launch: launch, python: python, native: app, processes: processes,
-                        pythonPlist: URL(fileURLWithPath: "/LA/\(py).plist"), nativePlist: URL(fileURLWithPath: "/LA/\(native).plist"),
-                        checkPlist: { _, _ in plistProblem }, sleep: { clock.sleep($0) }, now: { clock.now }, say: said)
-    }
-
-    @Test func switchingToNativeWaitsForPythonToFinishThenFlipsTheAgents() throws {
-        let launch = FakeLaunchControl(loaded: [py], disabled: [native])
-        var said: [String] = []
-        let python = FakePythonProbe([.busy("recording"), .busy("finishing a dictation"), .idle])
-        try switcher(launch, python: python, said: { said.append($0) }).switchToNative()
-        #expect(said.first == "Waiting for Python Voice Type to finish (recording)...")
-        #expect(launch.calls == ["disable \(py)", "bootout \(py)", "enable \(native)", "bootstrap \(native)"])
-        #expect(launch.disabled == [py])
-        #expect(launch.loaded == [native])
-        // Paused for the switch, and not resumed: it's stopped now.
-        #expect(python.pauses == 1 && python.resumes == 0)
-    }
-
-    @Test func pythonIsPausedFromTheIdleReadingThenCheckedAgainBeforeBootout() throws {
-        let launch = FakeLaunchControl(loaded: [py], disabled: [native])
-        var journal: [String] = []
-        let python = FakePythonProbe([.busy("recording"), .idle])
-        python.onEvent = { journal.append($0) }
-        let wrapped = JournalLaunchControl(launch) { journal.append($0) }
-        try switcher(wrapped, python: python).switchToNative()
-        #expect(Array(journal.prefix(7)) == ["activity busy(\"recording\")", "activity idle", "pause", "activity idle", "disable \(py)",
-                                             "activity idle", "bootout \(py)"])
-    }
-
-    @Test func aPythonPausedFromItsOwnMenuIsLeftPaused() {
-        let launch = FakeLaunchControl(loaded: [py], disabled: [native])
-        launch.failBootstrapOf = native
-        let python = FakePythonProbe([.idle])
-        python.enabled = false
-        #expect(throws: SwitchError.self) { try switcher(launch, python: python).switchToNative() }
-        #expect(python.pauses == 0 && python.resumes == 0)
-    }
-
-    @Test func aLoadedNativeAgentIsKickstartedNotBootstrapped() throws {
-        let launch = FakeLaunchControl(loaded: [py, native], disabled: [])
-        try switcher(launch, python: FakePythonProbe([.notRunning])).switchToNative()
-        #expect(launch.calls.suffix(2) == ["enable \(native)", "kickstart \(native)"])
-        let fromApp = FakeLaunchControl(loaded: [py, native], disabled: [])
-        try switcher(fromApp).switchToNative(fromNativeApp: true)
-        #expect(fromApp.calls.last == "enable \(native)")
-    }
-
-    @Test func givesUpIfPythonStaysBusy() {
-        let launch = FakeLaunchControl(loaded: [py], disabled: [native])
-        let python = FakePythonProbe([.busy("recording")])
-        #expect(throws: SwitchError.self) { try switcher(launch, python: python).switchToNative() }
-        #expect(launch.calls.isEmpty)
-        // Never paused, since it never read idle.
-        #expect(python.pauses == 0)
-        #expect(python.enabled == true)
-    }
-
-    @Test func aPythonStartedByHandIsStoppedTooAndTheLockChecked() throws {
-        let launch = FakeLaunchControl(loaded: [py], disabled: [native])
-        let processes = FakeProcesses()
-        processes.holder = .python(pid: 77)
-        processes.alive = [77]
-        processes.pythonWorkers = [77]
-        processes.lockedBy = 77
-        try switcher(launch, processes: processes).switchToNative()
-        #expect(processes.terminated == [77])
+    @Test func startingAnAgentThatIsNotLoadedBootstrapsIt() throws {
+        let launch = FakeLaunchControl(loaded: [], disabled: [])
+        try LaunchAgents.start(launch, plist: plist, checkPlist: { _, _ in nil })
+        #expect(launch.calls == ["bootstrap \(native)"])
         #expect(launch.loaded == [native])
     }
 
-    @Test func aPidThatIsNoLongerPythonIsLeftAlone() throws {
-        let launch = FakeLaunchControl(loaded: [py], disabled: [native])
-        let processes = FakeProcesses()
-        processes.holder = .python(pid: 77)
-        processes.alive = [77]
-        try switcher(launch, processes: processes).switchToNative()
-        #expect(processes.terminated.isEmpty)
+    @Test func aLoadedAgentIsKickstartedNotBootstrapped() throws {
+        // Quit from the menu: still loaded, just not running.
+        let launch = FakeLaunchControl(loaded: [native], disabled: [])
+        try LaunchAgents.start(launch, plist: plist, checkPlist: { _, _ in nil })
+        #expect(launch.calls == ["kickstart \(native)"])
     }
 
-    @Test func aBrokenNativePlistStopsTheSwitchBeforeAnythingChanges() {
-        let launch = FakeLaunchControl(loaded: [py], disabled: [native])
-        let python = FakePythonProbe([.idle])
-        #expect(throws: SwitchError("Can't switch: /LA/x.plist isn't a valid property list. Run native/scripts/build-app.sh first.")) {
-            try switcher(launch, python: python, plistProblem: "/LA/x.plist isn't a valid property list").switchToNative()
+    @Test func aDisabledAgentIsEnabledFirstSoItStartsAtLoginAgain() throws {
+        // How an older build's `switch python` left it.
+        let launch = FakeLaunchControl(loaded: [native], disabled: [native])
+        try LaunchAgents.start(launch, plist: plist, checkPlist: { _, _ in nil })
+        #expect(launch.calls == ["enable \(native)", "kickstart \(native)"])
+        #expect(launch.disabled.isEmpty)
+    }
+
+    @Test func aBrokenPlistIsReportedBeforeBootstrap() {
+        let launch = FakeLaunchControl(loaded: [], disabled: [])
+        #expect(throws: LaunchctlError("/LA/x.plist isn't a valid property list. Run native/scripts/build-app.sh to install it again.")) {
+            try LaunchAgents.start(launch, plist: plist, checkPlist: { _, _ in "/LA/x.plist isn't a valid property list" })
         }
         #expect(launch.calls.isEmpty)
-        #expect(python.pauses == 0)
-    }
-
-    @Test func aNativeAgentThatWontStartPutsPythonBack() {
-        let launch = FakeLaunchControl(loaded: [py], disabled: [native])
-        launch.failBootstrapOf = native
-        let python = FakePythonProbe([.idle])
-        #expect(throws: SwitchError.self) { try switcher(launch, python: python).switchToNative() }
-        #expect(launch.calls == ["disable \(py)", "bootout \(py)", "enable \(native)", "disable \(native)", "enable \(py)", "bootstrap \(py)"])
-        #expect(launch.disabled == [native])
-        #expect(launch.loaded == [py])
-        #expect(python.pauses == 1 && python.resumes == 1)
-    }
-
-    @Test func switchingToPythonAsksTheRunningAppToDoIt() throws {
-        let launch = FakeLaunchControl(loaded: [native], disabled: [py])
-        let processes = FakeProcesses()
-        processes.alive = [500]
-        let app = FakeNativeProbe()
-        app.pid = 500
-        app.onHandover = {
-            // What the app does once idle: disable itself, start Python, quit.
-            launch.disabled.insert(launch.native)
-            launch.disabled.remove(launch.python)
-            launch.loaded.insert(launch.python)
-            processes.alive.remove(500)
-        }
-        try switcher(launch, app: app, processes: processes).switchToPython()
-        #expect(app.handovers == [500])
-        #expect(launch.calls.isEmpty)
-        #expect(processes.terminated.isEmpty)
-    }
-
-    @Test func aHandOverTheAppRefusedIsReported() {
-        let launch = FakeLaunchControl(loaded: [native], disabled: [py])
-        let processes = FakeProcesses()
-        processes.alive = [500]
-        let app = FakeNativeProbe()
-        app.pid = 500
-        app.failure = "Python's agent isn't installed"
-        #expect(throws: SwitchError("Voice Type Native didn't switch to Python: Python's agent isn't installed. It's still running.")) {
-            try switcher(launch, app: app, processes: processes).switchToPython()
-        }
-        #expect(launch.calls.isEmpty)
-    }
-
-    @Test func anAppThatNeverAnswersIsStoppedFromHere() throws {
-        let launch = FakeLaunchControl(loaded: [native], disabled: [py])
-        let processes = FakeProcesses()
-        processes.alive = [500]
-        let app = FakeNativeProbe()
-        app.pid = 500
-        // launchd's bootout doesn't get it (a copy opened by hand), so it's signalled.
-        processes.holder = .native(pid: 500)
-        processes.lockedBy = 500
-        try switcher(launch, app: app, processes: processes).switchToPython()
-        #expect(launch.calls == ["disable \(native)", "bootout \(native)", "enable \(py)", "bootstrap \(py)"])
-        #expect(processes.terminated == [500])
-    }
-
-    @Test func switchingToPythonFromTheCommandLineWithNoAppRunning() throws {
-        let launch = FakeLaunchControl(loaded: [native], disabled: [py])
-        try switcher(launch).switchToPython()
-        #expect(launch.calls == ["disable \(native)", "bootout \(native)", "enable \(py)", "bootstrap \(py)"])
-    }
-
-    @Test func aPythonThatWontStartPutsNativeBack() {
-        let launch = FakeLaunchControl(loaded: [native], disabled: [py])
-        launch.failBootstrapOf = py
-        #expect(throws: SwitchError.self) { try switcher(launch).switchToPython() }
-        #expect(launch.calls == ["disable \(native)", "bootout \(native)", "enable \(py)", "disable \(py)", "enable \(native)", "bootstrap \(native)"])
-        #expect(launch.disabled == [py])
-        #expect(launch.loaded == [native])
-    }
-
-    @Test func aStillHeldLockStopsTheSwitchToPython() {
-        let launch = FakeLaunchControl(loaded: [native], disabled: [py])
-        let processes = FakeProcesses()
-        processes.holder = .native(pid: 600)
-        processes.alive = [600]
-        processes.lockedBy = 600
-        processes.exitsOnTerminate = false
-        processes.alive = [600]
-        // Doesn't exit on SIGTERM; SIGKILL gets it.
-        try? switcher(launch, processes: processes).switchToPython()
-        #expect(processes.killed == [600])
-        #expect(launch.loaded.contains(py))
-    }
-
-    @Test func theAppReleasesTheLockBeforePythonStarts() throws {
-        let launch = FakeLaunchControl(loaded: [native], disabled: [py])
-        var steps: [String] = []
-        try switcher(launch).switchToPythonFromNativeApp(releaseLock: {
-            steps.append("release")
-            steps.append(contentsOf: launch.calls)
-        })
-        #expect(steps == ["release", "disable \(native)"])
-        #expect(launch.calls == ["disable \(native)", "enable \(py)", "bootstrap \(py)"])
-        // The app's own agent stays loaded but disabled; it quits with 0, so KeepAlive leaves it.
-        #expect(launch.loaded.contains(native))
-    }
-
-    @Test func aFailedHandOverKeepsNativeEnabled() {
-        let launch = FakeLaunchControl(loaded: [native], disabled: [py])
-        launch.failBootstrapOf = py
-        #expect(throws: SwitchError.self) { try switcher(launch).switchToPythonFromNativeApp(releaseLock: {}) }
-        #expect(!launch.disabled.contains(native))
-        #expect(launch.disabled.contains(py))
-    }
-
-    @Test func readsPythonsControlState() {
-        func reply(_ json: String) -> PeerActivity { PythonControlState.activity(fromReply: Data(json.utf8)) }
-        #expect(reply(#"{"ok": true, "state": {"ui_state": "idle", "finalize_in_flight": false}}"#) == .idle)
-        #expect(reply(#"{"ok": true, "state": {"ui_state": "recording", "finalize_in_flight": false}}"#) == .busy("recording"))
-        // Python sets idle before it pastes; finalize_in_flight covers the paste.
-        #expect(reply(#"{"ok": true, "state": {"ui_state": "idle", "finalize_in_flight": true}}"#) == .busy("finishing a dictation"))
-        #expect(reply(#"{"ok": true, "state": {"ui_state": "processing", "finalize_in_flight": false}}"#) == .idle)
-        #expect(PythonControlState.enabled(fromReply: Data(#"{"ok": true, "state": {"enabled": false}}"#.utf8)) == false)
-        #expect(PythonControlState.enabled(fromReply: Data(#"{"ok": true, "state": {"enabled": true}}"#.utf8)) == true)
-        #expect(PythonControlState.enabled(fromReply: Data("nope".utf8)) == nil)
     }
 
     @Test func theNativeAgentIsAValidPlist() throws {
@@ -1111,7 +846,7 @@ struct SwitcherTests {
         let good = dir.appendingPathComponent("good.plist")
         try Data(LaunchAgents.nativePlistContents(executable: "/bin/sh").utf8).write(to: good)
         #expect(LaunchAgentCheck.problem(with: good, label: native) == nil)
-        #expect(LaunchAgentCheck.problem(with: good, label: py) == "\(good.path) isn't the agent for \(py)")
+        #expect(LaunchAgentCheck.problem(with: good, label: "com.example.other") == "\(good.path) isn't the agent for com.example.other")
         let gone = dir.appendingPathComponent("gone.plist")
         try Data(LaunchAgents.nativePlistContents(executable: "/nowhere/voice-type-native").utf8).write(to: gone)
         #expect(LaunchAgentCheck.problem(with: gone, label: native) == "\(gone.path) runs /nowhere/voice-type-native, which isn't there")
@@ -1122,111 +857,37 @@ struct SwitcherTests {
     }
 }
 
-/// Records each launchctl call in a shared journal, to check the order against other events.
-final class JournalLaunchControl: LaunchControl {
-    let inner: FakeLaunchControl
-    let note: (String) -> Void
-    init(_ inner: FakeLaunchControl, note: @escaping (String) -> Void) {
-        self.inner = inner
-        self.note = note
-    }
-    func isLoaded(_ label: String) -> Bool { inner.isLoaded(label) }
-    func isDisabled(_ label: String) -> Bool { inner.isDisabled(label) }
-    func enable(_ label: String) throws { note("enable \(label)"); try inner.enable(label) }
-    func disable(_ label: String) throws { note("disable \(label)"); try inner.disable(label) }
-    func bootstrap(_ plist: URL) throws { note("bootstrap \(plist.deletingPathExtension().lastPathComponent)"); try inner.bootstrap(plist) }
-    func bootout(_ label: String) throws { note("bootout \(label)"); try inner.bootout(label) }
-    func kickstart(_ label: String, restart: Bool) throws { note("kickstart \(label)"); try inner.kickstart(label, restart: restart) }
-}
-
-final class FakeLock: LockOwning {
-    var holdsLock = true
-    var available = true
-    private(set) var events: [String] = []
-    func takeLock() -> Bool {
-        events.append("take")
-        if available { holdsLock = true }
-        return holdsLock
-    }
-    func releaseLock() {
-        events.append("release")
-        holdsLock = false
-    }
-}
-
-struct NativeHandoverTests {
-    let py = LaunchAgents.pythonLabel
-    let native = LaunchAgents.nativeLabel
-
-    func handover(_ launch: FakeLaunchControl, lock: FakeLock, plistProblem: String? = nil, events: Box) -> NativeHandover {
-        let clock = ManualExecutor()
-        let switcher = Switcher(launch: launch, python: FakePythonProbe([.idle]), native: FakeNativeProbe(), processes: FakeProcesses(),
-                                pythonPlist: URL(fileURLWithPath: "/LA/\(py).plist"), nativePlist: URL(fileURLWithPath: "/LA/\(native).plist"),
-                                checkPlist: { _, _ in plistProblem }, sleep: { clock.sleep($0) }, now: { clock.now }, say: { _ in })
-        return NativeHandover(switcher: switcher, lock: lock, stopTap: { events.items.append("tap off") }, startTap: { events.items.append("tap on") })
-    }
-
-    final class Box { var items: [String] = [] }
-
-    @Test func handsOverWithTheTapOffBeforeTheLockGoes() {
-        let launch = FakeLaunchControl(loaded: [native], disabled: [py])
-        let lock = FakeLock()
-        let events = Box()
-        #expect(handover(launch, lock: lock, events: events).toPython() == .handedOver)
-        #expect(events.items == ["tap off"])
-        #expect(lock.events == ["release"])
-    }
-
-    @Test func aMissingPythonAgentLeavesTheTapAlone() {
-        let launch = FakeLaunchControl(loaded: [native], disabled: [py])
-        let lock = FakeLock()
-        let events = Box()
-        let outcome = handover(launch, lock: lock, plistProblem: "/LA/py.plist is missing", events: events).toPython()
-        #expect(outcome == .stayed("Can't switch: /LA/py.plist is missing. Run setup_mac.sh in the repo."))
-        #expect(events.items.isEmpty)
-        #expect(lock.events.isEmpty)
-        #expect(launch.calls.isEmpty)
-    }
-
-    @Test func aFailedStartTakesTheLockBackThenTurnsTheTapOn() {
-        let launch = FakeLaunchControl(loaded: [native], disabled: [py])
-        launch.failBootstrapOf = py
-        let lock = FakeLock()
-        let events = Box()
-        guard case .stayed = handover(launch, lock: lock, events: events).toPython() else { Issue.record("expected stayed"); return }
-        #expect(lock.events == ["release", "take"])
-        #expect(events.items == ["tap off", "tap on"])
-        #expect(!launch.disabled.contains(native))
-    }
-
-    @Test func ifPythonGotTheLockAnywayItStaysInCharge() {
-        let launch = FakeLaunchControl(loaded: [native], disabled: [py])
-        launch.failBootstrapOf = py
-        let lock = FakeLock()
-        lock.available = false
-        let events = Box()
-        guard case .pythonTookOver = handover(launch, lock: lock, events: events).toPython() else { Issue.record("expected pythonTookOver"); return }
-        #expect(events.items == ["tap off"])
-        #expect(launch.disabled.contains(native))
-        #expect(!launch.disabled.contains(py))
-    }
-}
-
 struct NativeStatusTests {
     @Test func roundTripsAndKnowsWhenItIsReadyOrBusy() throws {
         let dir = try temporaryDirectory("status")
         defer { try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("native-status.json")
-        var status = NativeStatus(pid: 77, state: "idle", modelStatus: "ready", hotkeyListener: "event-tap", holdsPythonLock: true)
+        var status = NativeStatus(pid: 77, state: "idle", modelStatus: "ready", hotkeyListener: "event-tap", holdsLock: true)
         try status.write(to: url)
         #expect(NativeStatus.read(from: url) == status)
         #expect(status.isReady && !status.isBusy)
-        #expect(NativeStatus.activity(from: url, isAlive: { _ in true }) == .idle)
-        #expect(NativeStatus.activity(from: url, isAlive: { _ in false }) == .notRunning)
         status.state = "finalising"
         try status.write(to: url)
-        #expect(NativeStatus.activity(from: url, isAlive: { _ in true }) == .busy("finalising"))
+        #expect(NativeStatus.read(from: url)?.isBusy == true)
+        // The key keeps its old name, so the file's format doesn't change.
         #expect(String(decoding: try Data(contentsOf: url), as: UTF8.self).contains("\"holds_python_lock\" : true"))
+        status.holdsLock = false
+        #expect(!status.isReady)
+    }
+
+    @Test func readsAFileAnOlderBuildWrote() throws {
+        let dir = try temporaryDirectory("status")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("native-status.json")
+        // Written by a build that could still switch to Python: its handover_failure is ignored.
+        try Data("""
+        {"enabled": true, "finalize_in_flight": false, "handover_failure": {"at": 1000, "message": "no Python agent"},
+         "holds_python_lock": true, "hotkey_listener": "event-tap", "message": "", "microphone": "Yeti", "model_status": "ready",
+         "pasteboard_access": "default", "permissions": {}, "pid": 77, "preferred_microphone": "", "state": "idle",
+         "updated_at": "2026-10-24T09:00:00+00:00", "version": "0.1.0"}
+        """.utf8).write(to: url)
+        let status = try #require(NativeStatus.read(from: url))
+        #expect(status.pid == 77 && status.isReady)
     }
 }
 

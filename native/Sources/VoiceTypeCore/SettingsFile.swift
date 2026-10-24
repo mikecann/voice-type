@@ -1,12 +1,12 @@
 import Foundation
 
-/// settings.json as both apps share it: native reads the keys it needs, and when it changes
-/// one it rewrites the file the way Python's _save_settings does, keeping every key it doesn't
-/// know about in its place.
+/// settings.json, in the Python version's format: native reads the keys it needs, and when it
+/// changes one it rewrites the file the way Python's _save_settings did, keeping every key it
+/// doesn't know about (the Python version's own included) in its place.
 ///
-/// Python writes `json.dump(settings, f, indent=2)` (so non-ASCII is escaped) with no
-/// trailing newline, to `settings.json.<pid>.tmp`, fsyncs and renames it. Native-only
-/// settings live under "native", which Python carries along without reading.
+/// Python wrote `json.dump(settings, f, indent=2)` (so non-ASCII is escaped) with no
+/// trailing newline, to `settings.json.<pid>.tmp`, fsynced and renamed it. Native-only
+/// settings live under "native".
 public struct SettingsFile: Sendable {
     public var url: URL
     public private(set) var json: JSONValue
@@ -41,8 +41,6 @@ public struct SettingsFile: Sendable {
 
     /// Read now so phase 2 can follow it; native doesn't draw yet.
     public var drawOnScreenEnabled: Bool { json["draw_on_screen_enabled"]?.isTruthy ?? true }
-
-    public var formatterEnabled: Bool { json["formatter_enabled"]?.isTruthy ?? false }
 
     /// The vocabulary as Python's `list(_settings.get("vocabulary", []))` would store it in a
     /// recording: the list itself when it's a list of strings.

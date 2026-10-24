@@ -165,8 +165,9 @@ struct CompositeTests {
     }
 }
 
-/// Against Python's own composite_png on the same synthetic captures
-/// (scripts/make-mark-fixtures.py).
+/// Against Python's own composite_png on the same synthetic captures. The script that made
+/// them (scripts/make-mark-fixtures.py) went with the Python version after commit 17e8220;
+/// check that commit out to regenerate them.
 struct GoldenCompositeTests {
     struct Case: Decodable {
         struct Mark: Decodable {

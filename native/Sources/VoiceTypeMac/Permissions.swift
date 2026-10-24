@@ -4,8 +4,8 @@ import AVFoundation
 import CoreGraphics
 import VoiceTypeCore
 
-/// The grants Voice Type Native needs. They belong to its own bundle id, so they're asked for
-/// once even though Python's are already there, and Python's stay put for switching back.
+/// The grants Voice Type Native needs. They belong to its bundle id and signing certificate,
+/// so a rebuild signed the same way keeps them.
 enum Permission: String, CaseIterable {
     case accessibility
     case inputMonitoring = "input_monitoring"
@@ -158,7 +158,7 @@ final class PermissionsWindow: NSObject, NSWindowDelegate {
         let content = NSView(frame: window.contentRect(forFrameRect: window.frame))
         window.contentView = content
 
-        let intro = NSTextField(wrappingLabelWithString: "Voice Type Native needs these before it can take over from the Python app. Python keeps its own, so switching back still works.")
+        let intro = NSTextField(wrappingLabelWithString: "What Voice Type Native needs, and why. Each button asks macOS, or opens the right page in System Settings.")
         intro.frame = NSRect(x: 20, y: height - 50, width: width - 40, height: 34)
         content.addSubview(intro)
 

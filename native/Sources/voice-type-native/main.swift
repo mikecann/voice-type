@@ -2,8 +2,8 @@
 //
 // Launched as Voice Type Native.app (by launchd, or opened), with no arguments, it's the
 // menu bar app. Otherwise it's the command line. transcribe, serve, replay and tokens never
-// touch the keyboard tap, the microphone or Python's instance lock, so they're safe to run
-// while either app is dictating; settings.json and the recordings are only read.
+// touch the keyboard tap, the microphone or the instance lock, so they're safe to run while
+// the app is dictating; settings.json and the recordings are only read.
 
 import Foundation
 import VoiceTypeCore
@@ -29,7 +29,6 @@ case "replay": cli.replay()
 case "tokens": cli.tokens()
 case "composite": cli.composite()
 case "status": service.status()
-case "switch": service.switchTo()
 case "restart": service.restart()
 case "launch-agent-plist": service.launchAgentPlist()
 case "":
