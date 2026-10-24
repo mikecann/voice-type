@@ -6,12 +6,14 @@ public enum WhisperEngineError: LocalizedError, CustomStringConvertible {
     case modelMissing(String)
     case loadFailed(String)
     case decodeFailed(Int32)
+    case aborted
 
     public var description: String {
         switch self {
         case let .modelMissing(path): return "no model at \(path) (pass --model PATH)"
         case let .loadFailed(path): return "whisper.cpp could not load \(path)"
         case let .decodeFailed(rc): return "whisper_full returned \(rc)"
+        case .aborted: return "the transcription was stopped part way"
         }
     }
 
@@ -22,7 +24,7 @@ public enum WhisperEngineError: LocalizedError, CustomStringConvertible {
 /// does, since that's the configuration the benchmark measured (its wcpp-q8-vocab key).
 ///
 /// Not thread-safe: one thread owns a context, which is also the plan for the app.
-public final class WhisperEngine: SpeechEngine {
+public final class WhisperEngine: DictationEngine {
     private let context: OpaquePointer
     public let threads: Int32
     public let loadMilliseconds: Double
@@ -85,6 +87,14 @@ public final class WhisperEngine: SpeechEngine {
     }
 
     public func transcribe(_ samples: [Float], options: TranscribeOptions) throws -> Transcript {
+        try transcribe(samples, options: options, abort: nil)
+    }
+
+    /// `abort` is only ever set for live previews. whisper.cpp asks it before the encoder
+    /// starts and before each ggml computation, so a key-up stops a running preview within
+    /// one step and the final pass goes next. With no flag the parameters are exactly the
+    /// benchmarked ones.
+    public func transcribe(_ samples: [Float], options: TranscribeOptions, abort: AbortFlag?) throws -> Transcript {
         // Matched to how voice-type calls mlx_whisper.transcribe, via whispercpp-bench:
         // English, temperature 0 with fallback in steps of 0.2, timestamps on, nothing
         // carried over from earlier calls, suppress_blank and non-speech tokens, max initial
@@ -120,6 +130,18 @@ public final class WhisperEngine: SpeechEngine {
         // changes nothing the benchmark measured.
         p.carry_initial_prompt = true
 
+        if let abort {
+            let flag = Unmanaged.passUnretained(abort).toOpaque()
+            p.abort_callback = { data in
+                Unmanaged<AbortFlag>.fromOpaque(data!).takeUnretainedValue().isSet
+            }
+            p.abort_callback_user_data = flag
+            p.encoder_begin_callback = { _, _, data in
+                !Unmanaged<AbortFlag>.fromOpaque(data!).takeUnretainedValue().isSet
+            }
+            p.encoder_begin_callback_user_data = flag
+        }
+
         let rc: Int32 = "en".withCString { language in
             p.language = language
             return options.promptTokens.withUnsafeBufferPointer { prompt in
@@ -130,6 +152,9 @@ public final class WhisperEngine: SpeechEngine {
                 }
             }
         }
+        // The flag stays alive for the whole call: the caller holds it.
+        withExtendedLifetime(abort) {}
+        if abort?.isSet == true { throw WhisperEngineError.aborted }
         guard rc == 0 else { throw WhisperEngineError.decodeFailed(rc) }
 
         let eot = whisper_token_eot(context)

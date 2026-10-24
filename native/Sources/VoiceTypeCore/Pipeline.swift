@@ -54,16 +54,29 @@ public struct DictationResult: Sendable {
         case flatlineCapture = "flatline_capture"
         /// Short and near-silent; nothing transcribed.
         case skippedLowLevel = "skipped_low_level"
+        /// A second or more that never got louder than the room, which Whisper turned into
+        /// one of its silence phrases ("Thank you."); nothing typed. Native only: see
+        /// AudioGate.isLongNearSilentClip and isSilenceHallucination.
+        case skippedNearSilent = "skipped_near_silent"
         /// Under 0.3 s; Whisper isn't asked.
         case tooShort = "too_short"
         /// Whisper ran but nothing was left to type.
         case finishedWithoutText = "finished_without_text"
         case completed
 
-        /// The status the Python app writes to a recording's JSON for the same outcome.
+        /// The status the Python app writes to a recording's JSON for the same outcome. The
+        /// near-silence gate's skips are recorded like the short-clip gate's, since they're
+        /// the same kind of outcome to anything reading the archive.
         public var pythonStatus: String {
-            self == .tooShort ? "finished_without_text" : rawValue
+            switch self {
+            case .tooShort: return "finished_without_text"
+            case .skippedNearSilent: return "skipped_low_level"
+            default: return rawValue
+            }
         }
+
+        /// True when a gate kept the clip from Whisper.
+        public var wasGated: Bool { self == .flatlineCapture || self == .skippedLowLevel || self == .tooShort }
     }
 
     public var status: Status
@@ -85,6 +98,8 @@ public struct DictationResult: Sendable {
 
 /// Everything between key-up and typing, in the order voice-type.py does it: the flatline and
 /// near-silence gates, the 0.3 s minimum, Whisper, the repetition loop guard, corrections.
+/// Native adds one check after Whisper, for silent clips of a second or more that it turned
+/// into "Thank you.".
 public struct DictationPipeline {
     public var engine: SpeechEngine
     public var settings: VoiceTypeSettings
@@ -98,6 +113,12 @@ public struct DictationPipeline {
 
     public func run(_ samples: [Float]) throws -> DictationResult {
         let levels = AudioLevels(samples: samples)
+        if let gated = Self.gate(levels) { return gated }
+        return try transcribe(samples, levels: levels)
+    }
+
+    /// The gates on their own, in order. Nil means the clip goes to Whisper.
+    public static func gate(_ levels: AudioLevels) -> DictationResult? {
         if AudioGate.isFlatlineAudioCapture(durationSec: levels.durationSec, rms: levels.rms, peak: levels.peak) {
             return DictationResult(status: .flatlineCapture, levels: levels, text: "")
         }
@@ -108,9 +129,19 @@ public struct DictationPipeline {
         if levels.durationSec < 0.3 {
             return DictationResult(status: .tooShort, levels: levels, text: "")
         }
+        return nil
+    }
+
+    /// Whisper, the loop guard and corrections, for a clip the gates let through. A clip of a
+    /// second or more that stayed near silent is dropped here if Whisper only produced one of
+    /// its silence phrases, so a quiet real "Sure." still gets typed.
+    public func transcribe(_ samples: [Float], levels: AudioLevels) throws -> DictationResult {
         let transcript = try engine.transcribe(samples, options: options)
         let raw = transcript.text
         let guarded = RepetitionLoopGuard.guardLoops(raw, durationSec: levels.durationSec)
+        if AudioGate.isLongNearSilentClip(durationSec: levels.durationSec, peak: levels.peak) && AudioGate.isSilenceHallucination(guarded) {
+            return DictationResult(status: .skippedNearSilent, levels: levels, rawTranscript: raw, text: "", transcript: transcript)
+        }
         let text = settings.corrections.apply(guarded)
         return DictationResult(
             status: text.isEmpty ? .finishedWithoutText : .completed,

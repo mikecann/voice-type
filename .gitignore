@@ -20,3 +20,6 @@ settings.json.*.tmp
 transcription-history.jsonl*
 recordings/
 trusted-launcher-path
+# Test fixtures written by Python's own code, which the native tests compare against.
+!native/Tests/VoiceTypeCoreTests/Fixtures/python/settings.json
+!native/Tests/VoiceTypeCoreTests/Fixtures/python/transcription-history.jsonl

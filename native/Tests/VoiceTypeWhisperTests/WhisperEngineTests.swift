@@ -51,4 +51,47 @@ struct WhisperEngineTests {
         let result = try pipeline.run([Float](repeating: 0, count: 16000))
         #expect(result.status == .flatlineCapture)
     }
+
+    /// Quiet noise, deterministic, so a clip is the same on every run.
+    func noise(seconds: Double) -> [Float] {
+        var state: UInt32 = 12345
+        return (0..<Int(seconds * 16000)).map { _ in
+            state = state &* 1_664_525 &+ 1_013_904_223
+            return (Float(state >> 8) / Float(1 << 24) - 0.5) * 0.02
+        }
+    }
+
+    @Test func aFlagThatIsNeverSetChangesNothing() throws {
+        let clip = noise(seconds: 3)
+        let options = TranscribeOptions(promptTokens: Self.mlxPromptTokens)
+        let plain = try engine.transcribe(clip, options: options)
+        let flagged = try engine.transcribe(clip, options: options, abort: AbortFlag())
+        #expect(plain.text == flagged.text)
+        #expect(plain.segments.map(\.tokenProbs) == flagged.segments.map(\.tokenProbs))
+    }
+
+    @Test func anAbortedPreviewStopsBeforeTheEncoder() {
+        let flag = AbortFlag()
+        flag.set()
+        let started = Date()
+        #expect(throws: WhisperEngineError.self) { try engine.transcribe(noise(seconds: 5), options: TranscribeOptions(), abort: flag) }
+        #expect(Date().timeIntervalSince(started) < 0.2)
+    }
+
+    /// whisper.cpp checks the flag between ggml computations, so an encoder pass that has
+    /// started runs to the end (about 0.2 s here) and nothing after it does: a key-up costs
+    /// the final pass at most one encoder step, as PLAN.md expects.
+    @Test func aKeyUpStopsARunningPreviewAfterItsCurrentStep() throws {
+        let clip = noise(seconds: 28)
+        let flag = AbortFlag()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.03) { flag.set() }
+        let started = Date()
+        do {
+            _ = try engine.transcribe(clip, options: TranscribeOptions(), abort: flag)
+            Issue.record("the preview ran to the end")
+        } catch let error as WhisperEngineError {
+            #expect(error.description == WhisperEngineError.aborted.description)
+        }
+        #expect(Date().timeIntervalSince(started) < 1.0)
+    }
 }

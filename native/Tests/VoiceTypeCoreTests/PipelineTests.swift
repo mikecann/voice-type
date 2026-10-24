@@ -90,3 +90,34 @@ struct PipelineTests {
         #expect(engine.calls.count == 1)
     }
 }
+
+struct NearSilencePipelineTests {
+    // 2.2 s of room noise peaking at 0.002.
+    let room = (0..<35_200).map { Float(($0 * 7919) % 41) / 20 * 0.001 - 0.001 }
+
+    func pipeline(_ engine: FakeEngine) -> DictationPipeline {
+        DictationPipeline(engine: engine, settings: VoiceTypeSettings(vocabulary: nil, corrections: Corrections([])), options: TranscribeOptions())
+    }
+
+    @Test func aLongSilentClipThatWhisperCallsThankYouIsDropped() throws {
+        let engine = FakeEngine(["Thank you."])
+        let result = try pipeline(engine).run(room)
+        #expect(result.status == .skippedNearSilent)
+        #expect(result.status.pythonStatus == "skipped_low_level")
+        #expect(result.text.isEmpty)
+        #expect(result.rawTranscript == "Thank you.")
+        #expect(engine.calls.count == 1)
+    }
+
+    @Test func quietRealWordsAreStillTyped() throws {
+        let result = try pipeline(FakeEngine(["Sure."])).run(room)
+        #expect(result.status == .completed)
+        #expect(result.text == "Sure.")
+    }
+
+    @Test func aRealThankYouAtANormalLevelIsTyped() throws {
+        let speech = (0..<32_000).map { $0 % 2 == 0 ? Float(0.1) : -0.1 }
+        let result = try pipeline(FakeEngine(["Thank you."])).run(speech)
+        #expect(result.text == "Thank you.")
+    }
+}

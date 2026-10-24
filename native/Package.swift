@@ -1,8 +1,8 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
-// Voice Type Native, phase 1a: the dictation pipeline and a command-line tool, no app yet.
-// See PLAN.md for where this is going and README.md for building and running it.
+// Voice Type Native: the dictation pipeline, the menu bar app and its command line, in one
+// executable. See PLAN.md for where this is going and README.md for building and running it.
 let package = Package(
     name: "VoiceTypeNative",
     platforms: [.macOS("26.0")],
@@ -27,9 +27,18 @@ let package = Package(
         // The only code that talks to whisper.cpp.
         .target(name: "VoiceTypeWhisper", dependencies: ["VoiceTypeCore", "whisper"]),
 
+        // Everything that touches the Mac: the keyboard tap, Core Audio, the pasteboard and
+        // Accessibility, launchctl, the menu bar item and the pill. Kept thin; the decisions
+        // are in VoiceTypeCore, behind the protocols these implement.
+        // Swift 5 mode: AppKit, C callbacks and GCD queues that Swift 6's checker can't see.
+        .target(name: "VoiceTypeMac", dependencies: ["VoiceTypeCore", "VoiceTypeWhisper"],
+                swiftSettings: [.swiftLanguageMode(.v5)]),
+
+        // The app when launched as Voice Type Native.app, the command line otherwise.
         .executableTarget(
             name: "voice-type-native",
-            dependencies: ["VoiceTypeCore", "VoiceTypeWhisper"]
+            dependencies: ["VoiceTypeCore", "VoiceTypeWhisper", "VoiceTypeMac"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
         ),
 
         .testTarget(
@@ -41,6 +50,13 @@ let package = Package(
         .testTarget(
             name: "VoiceTypeWhisperTests",
             dependencies: ["VoiceTypeCore", "VoiceTypeWhisper"]
+        ),
+        // The Mac pieces that can be tested without hardware or permissions: resampling,
+        // the ring buffer, launchctl output parsing. Nothing here opens a tap, the
+        // microphone or the pasteboard.
+        .testTarget(
+            name: "VoiceTypeMacTests",
+            dependencies: ["VoiceTypeCore", "VoiceTypeMac"]
         ),
     ]
 )
