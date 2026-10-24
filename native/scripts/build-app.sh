@@ -85,6 +85,19 @@ app="$stage/$APP_NAME.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources"
 
+# The icon is drawn in native/icons/voice-type-native.svg and rendered to the PNG next to it.
+icon_png="$NATIVE_DIR/icons/voice-type-native.png"
+[[ -f "$icon_png" ]] || die "no app icon at $icon_png"
+iconset="$stage/voice-type-native.iconset"
+rm -rf "$iconset"
+mkdir -p "$iconset"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" "$icon_png" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+  sips -z "$((size * 2))" "$((size * 2))" "$icon_png" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$app/Contents/Resources/voice-type-native.icns"
+rm -rf "$iconset"
+
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -100,6 +113,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <string>$APP_NAME</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleIconFile</key>
+  <string>voice-type-native</string>
   <key>CFBundleShortVersionString</key>
   <string>$version</string>
   <key>CFBundleVersion</key>
@@ -174,6 +189,9 @@ ditto "$app" "$HOME/Applications/.$APP_NAME.app.new"
 if [[ -d "$installed" ]]; then mv "$installed" "$HOME/Applications/.$APP_NAME.app.old"; fi
 mv "$HOME/Applications/.$APP_NAME.app.new" "$installed"
 rm -rf "$HOME/Applications/.$APP_NAME.app.old"
+# Tell Launch Services about the swapped bundle, or Finder and System Settings can keep
+# showing the previous build's icon.
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$installed" >/dev/null 2>&1 || true
 say "Installed $installed"
 
 model="$data_dir/models/$MODEL_NAME"

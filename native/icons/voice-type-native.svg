@@ -1,0 +1,42 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="128" y1="64" x2="896" y2="960" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#17202B"/>
+      <stop offset="1" stop-color="#090C12"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="262" y1="0" x2="598" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#36C6A9"/>
+      <stop offset="0.52" stop-color="#8A79F5"/>
+      <stop offset="1" stop-color="#F18A4B"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="16" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="ink" x="-30%" y="-100%" width="160%" height="300%">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <!-- The same dark tile as Meeting Archive and Token Stats. -->
+  <rect x="72" y="72" width="880" height="880" rx="214" fill="url(#bg)"/>
+  <rect x="73.5" y="73.5" width="877" height="877" rx="212.5" stroke="white" stroke-opacity=".12" stroke-width="3"/>
+  <!-- What you say, in Meeting Archive's waveform colours... -->
+  <g stroke="url(#wave)" stroke-width="48" stroke-linecap="round" filter="url(#glow)">
+    <path d="M262 452V572"/>
+    <path d="M346 372V652"/>
+    <path d="M430 312V712"/>
+    <path d="M514 392V632"/>
+    <path d="M598 462V562"/>
+  </g>
+  <!-- ...landing as typed text at the cursor. -->
+  <g stroke="white" stroke-width="34" stroke-linecap="round">
+    <path d="M722 310V714"/>
+    <path d="M668 310H776M668 714H776"/>
+  </g>
+  <!-- Token Stats' white corner strokes, framing it like a text field. -->
+  <path d="M194 264C194 226 225 195 263 195H357" stroke="white" stroke-opacity=".9" stroke-width="34" stroke-linecap="round"/>
+  <path d="M830 760C830 798 799 829 761 829H667" stroke="white" stroke-opacity=".9" stroke-width="34" stroke-linecap="round"/>
+  <!-- A hand-drawn underline in the screen ink's red, for drawing while you talk. -->
+  <path d="M246 798C326 781 446 773 552 781C586 784 610 787 626 774" stroke="#FF3B30" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" filter="url(#ink)"/>
+</svg>
