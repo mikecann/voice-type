@@ -249,6 +249,8 @@ final class FakePill: PillPresenting, @unchecked Sendable {
     func showPasteFailed(_ miss: FocusMiss?) { calls.append(miss.map { "paste_failed:\($0.role)" } ?? "paste_failed") }
     func showScreenRecordingHint() { calls.append("hint") }
     func showClipboardNotKept() { calls.append("clipboard_not_kept") }
+    func showRecovered(count: Int, seconds: Double) { calls.append("recovered:\(count)") }
+    func showSecondsLeft(_ seconds: Int) { calls.append("left:\(seconds)") }
     func hide() { calls.append("hide") }
 }
 
@@ -305,10 +307,15 @@ final class ControllerHarness: @unchecked Sendable {
     var controller: DictationController!
 
     let marks: MarkSessions?
+    private(set) var spool: RecordingSpool?
+    private(set) var recovery: DictationRecovery?
+    private(set) var recovered: [RecoveredDictation] = []
 
     init(devices: [InputDevice] = [InputDevice(id: 1, name: "MacBook Pro Microphone"), InputDevice(id: 2, name: "Yeti Stereo Microphone")],
          settings: JSONValue = .object([("audio_recording_enabled", .bool(true)), ("vocabulary", .strings(["Convex"]))]),
-         readinessLane: ManualExecutor? = nil, marks: MarkSessions? = nil) throws {
+         readinessLane: ManualExecutor? = nil, finaliseLane: ManualExecutor? = nil, marks: MarkSessions? = nil,
+         spool: Bool = false, recovery: Bool = false,
+         beforeStart: (URL) throws -> Void = { _ in }) throws {
         self.marks = marks
         catalog = FakeCatalog(devices, default: devices.first)
         probe = FakeProbe(catalog: catalog)
@@ -318,6 +325,10 @@ final class ControllerHarness: @unchecked Sendable {
         history = TranscriptionHistory(url: directory.appendingPathComponent("transcription-history.jsonl"))
         settingsJSON = settings
         let log: @Sendable (String) -> Void = { [unowned self] in self.logs.append($0) }
+        // What an earlier run left in the data folder, before this one starts.
+        try beforeStart(directory)
+        if spool { self.spool = RecordingSpool(directory: directory.appendingPathComponent("recordings"), log: log) }
+        if recovery { self.recovery = DictationRecovery(archive: archive, history: history, transcriber: transcriber, log: log) }
         recorder = Recorder(catalog: catalog, factory: factory, log: log, bounded: { [unowned self] _, work in
             // A hung Core Audio call: the work never finishes in time.
             if self.coreAudioHangs { return false }
@@ -335,13 +346,14 @@ final class ControllerHarness: @unchecked Sendable {
             log: log, restartProcess: { [unowned self] in self.restarts.append($0) },
             publish: { [unowned self] in self.snapshots.append($0) },
             now: { executor.now }, wallClock: { [unowned self] in self.wall },
-            queue: executor, finaliseLane: executor, readinessLane: readinessLane ?? executor,
+            queue: executor, finaliseLane: finaliseLane ?? executor, readinessLane: readinessLane ?? executor,
             makeWatchdog: { [unowned self] name, timeout, fire in
                 self.watchdogs.append((name, timeout, fire))
                 // Never fires by itself; tests fire it through `watchdogs`.
                 return OperationWatchdog(name: name, timeout: 86_400 * 365, onTimeout: {})
             },
-            marks: marks
+            marks: marks, spool: self.spool, recovery: self.recovery,
+            recovered: { [unowned self] in self.recovered.append(contentsOf: $0) }
         )
         controller = DictationController(ports: ports)
     }

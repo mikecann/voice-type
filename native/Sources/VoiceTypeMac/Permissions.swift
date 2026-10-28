@@ -82,7 +82,9 @@ enum Permission: String, CaseIterable {
         }
     }
 
-    var isSatisfied: Bool {
+    var isSatisfied: Bool { isSatisfied(state) }
+
+    func isSatisfied(_ state: String) -> Bool {
         switch self {
         // "Ask" works: macOS asks, and Allow lets the read through.
         case .pasteFromOtherApps: return state != "denied"
@@ -121,97 +123,4 @@ enum Permission: String, CaseIterable {
     }
 
     static var missing: [Permission] { allCases.filter { !$0.isSatisfied } }
-}
-
-/// A small window listing each permission with a button to grant it. It opens by itself at
-/// launch when something's missing, and from the menu.
-final class PermissionsWindow: NSObject, NSWindowDelegate {
-    private var window: NSWindow?
-    private var rows: [(Permission, NSTextField, NSButton)] = []
-    private var refresh: Timer?
-
-    func show() {
-        if window == nil { build() }
-        update()
-        NSApp.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
-        refresh?.invalidate()
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.update() }
-        RunLoop.main.add(timer, forMode: .common)
-        refresh = timer
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        refresh?.invalidate()
-        refresh = nil
-    }
-
-    private func build() {
-        let width: CGFloat = 520
-        let rowHeight: CGFloat = 64
-        let height = CGFloat(Permission.allCases.count) * rowHeight + 70
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height), styleMask: [.titled, .closable],
-                              backing: .buffered, defer: false)
-        window.title = "Voice Type Native permissions"
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-        let content = NSView(frame: window.contentRect(forFrameRect: window.frame))
-        window.contentView = content
-
-        let intro = NSTextField(wrappingLabelWithString: "What Voice Type Native needs, and why. Each button asks macOS, or opens the right page in System Settings.")
-        intro.frame = NSRect(x: 20, y: height - 50, width: width - 40, height: 34)
-        content.addSubview(intro)
-
-        for (i, permission) in Permission.allCases.enumerated() {
-            let top = height - 70 - CGFloat(i + 1) * rowHeight + 8
-            let title = NSTextField(labelWithString: permission.title)
-            title.font = .boldSystemFont(ofSize: 13)
-            title.frame = NSRect(x: 20, y: top + 32, width: 200, height: 18)
-            let why = NSTextField(wrappingLabelWithString: permission.why)
-            why.font = .systemFont(ofSize: 11)
-            why.textColor = .secondaryLabelColor
-            why.frame = NSRect(x: 20, y: top, width: 300, height: 30)
-            let state = NSTextField(labelWithString: "")
-            state.frame = NSRect(x: 330, y: top + 32, width: 170, height: 18)
-            let button = NSButton(title: "Open System Settings", target: self, action: #selector(grant(_:)))
-            button.tag = i
-            button.bezelStyle = .rounded
-            button.frame = NSRect(x: 326, y: top + 2, width: 180, height: 28)
-            for view in [title, why, state, button] { content.addSubview(view) }
-            rows.append((permission, state, button))
-        }
-        window.center()
-        self.window = window
-    }
-
-    private func update() {
-        for (permission, state, button) in rows {
-            let value = permission.state
-            switch value {
-            case "allowed": state.stringValue = "Allowed"
-            case "ask": state.stringValue = "Asks each time"
-            case "not_asked": state.stringValue = "Not asked yet"
-            default: state.stringValue = "Not allowed"
-            }
-            state.textColor = permission.isSatisfied ? .systemGreen : .systemOrange
-            if permission == .pasteFromOtherApps {
-                button.title = value == "not_asked" ? "Check now" : "Open System Settings"
-            } else if permission == .microphone && value == "not_asked" {
-                button.title = "Ask now"
-            } else {
-                button.title = "Open System Settings"
-            }
-            button.isEnabled = !(permission.state == "allowed")
-        }
-    }
-
-    @objc private func grant(_ sender: NSButton) {
-        let permission = Permission.allCases[sender.tag]
-        if permission == .pasteFromOtherApps && permission.state != "not_asked" {
-            NSWorkspace.shared.open(permission.settingsURL)
-        } else {
-            permission.request()
-        }
-        update()
-    }
 }

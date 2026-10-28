@@ -12,6 +12,8 @@ You can also draw on the screen while you talk. I spend a lot of my day reviewin
 
 It's Mac only (Apple Silicon and macOS 26) and runs whisper.cpp with the large-v3-turbo model locally on the GPU, so a short clip is typed about a third of a second after you let go.
 
+The menu bar icon has a settings window (microphone, the words it should listen for, corrections and so on) and a history of everything you've dictated in the last 30 days, where you can search, copy, play the audio back, or fix what it got wrong. The audio is written to disk while you talk, so if the app ever crashes mid-dictation it transcribes what you said when it comes back and puts it in the history.
+
 ## Get it
 
 You'll need Xcode 27. Then:
@@ -22,7 +24,7 @@ cd voice-type
 native/scripts/build-app.sh
 ```
 
-That builds Voice Type Native.app, signs it, installs it to `~/Applications`, puts the speech model in place (an 874 MB download the first time) and starts it from its own LaunchAgent, so it comes back at login and after a crash. The first time it opens a window with the permissions it needs (Accessibility, Input Monitoring and the microphone), and macOS asks for Screen Recording the first time you draw.
+That builds Voice Type Native.app, signs it, installs it to `~/Applications`, puts the speech model in place (an 874 MB download the first time) and starts it from its own LaunchAgent, so it comes back at login and after a crash. The first time it opens its settings at the permissions it needs (Accessibility, Input Monitoring and the microphone), and macOS asks for Screen Recording the first time you draw.
 
 The script signs with my Apple Development certificate, so change `IDENTITY` at the top of it to one of yours first (`security find-identity -v -p codesigning` lists them). It has to be a real certificate rather than an ad hoc signature, otherwise macOS forgets the app's permissions every time you rebuild it.
 

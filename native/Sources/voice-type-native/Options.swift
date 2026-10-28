@@ -14,12 +14,19 @@ let usage = """
                               draw screen marks onto a capture the way the app does
                               (marks: [{"number": 1, "points": [[x, y], ...]}], in points)
 
+      history [N]             list the last N dictations (default 20) as the History
+                              window shows them
+
     running the app (these never need the app to be working):
       status                  what Voice Type Native is doing
+      show [WINDOW]           open a window in the running app: settings (default),
+                              words, permissions or history
       restart                 restart Voice Type Native once it's idle (or start it if
                               it isn't running), and wait until it's ready again
                               (--force restarts straight away)
       launch-agent-plist EXE  print the LaunchAgent for an installed app (build script)
+      snapshot-windows DIR    save PNGs of the settings and history windows (shown behind
+                              every other window for a moment, without taking focus)
 
     options:
       --raw                   run only Whisper: no gates, loop guard or corrections

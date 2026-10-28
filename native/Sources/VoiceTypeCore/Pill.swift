@@ -20,6 +20,8 @@ public enum PillState: String, Sendable {
     case hint
     /// Pasted, but the old clipboard couldn't be read, so it's gone.
     case clipboardNotKept = "clipboard_not_kept"
+    /// A dictation cut off by a crash was transcribed after the restart.
+    case recovered
 }
 
 public enum PillColor: Sendable, Equatable {
@@ -34,18 +36,20 @@ public struct PillAppearance: Equatable, Sendable {
     /// Feedback labels need more room; the panel itself never changes width.
     public var wideLabel: Bool
 
-    public init(state: PillState, text: String) {
+    /// `secondsLeft` replaces REC for the last seconds before the 120 s cap.
+    public init(state: PillState, text: String, secondsLeft: Int? = nil) {
         self.state = state
         switch state {
-        case .rec: label = " REC"
+        case .rec: label = secondsLeft.map { " \($0)s" } ?? " REC"
         case .done: label = " \(text)"
         case .pasteFailed: label = " Clipboard"
         case .hint: label = " No screenshots"
         case .processing: label = " ..."
         case .clipboardNotKept: label = " Pasted"
+        case .recovered: label = " Recovered"
         }
         preview = state == .done ? "" : text
-        color = state == .done ? .green : state == .rec ? .red : .orange
+        color = state == .done || state == .recovered ? .green : state == .rec ? .red : .orange
         wideLabel = state == .done || state.isNotice
     }
 }
@@ -53,7 +57,7 @@ public struct PillAppearance: Equatable, Sendable {
 /// The parts of the pill that touch AppKit. Called on the main thread only.
 extension PillState {
     /// Feedback that holds without the tick or a fade.
-    var isNotice: Bool { self == .pasteFailed || self == .hint || self == .clipboardNotKept }
+    var isNotice: Bool { self == .pasteFailed || self == .hint || self == .clipboardNotKept || self == .recovered }
 }
 
 public protocol PillSurface: AnyObject {
@@ -92,6 +96,9 @@ public final class PillController {
 
     public private(set) var state: PillState?
     public private(set) var isVisible = false
+    /// The cap's countdown while it runs; REC shows again for the next recording.
+    private var secondsLeft: Int?
+    private var lastText = ""
     private var feedbackTimer: Cancellable?
     private var feedbackStarted = 0.0
     private var fadeStarted = 0.0
@@ -106,6 +113,14 @@ public final class PillController {
     }
 
     public func showRecording(_ preview: String = "") { show(.rec, preview) }
+
+    /// The last seconds before the 120 s cap stops the recording, in place of REC, so it
+    /// doesn't stop mid-sentence without warning.
+    public func showSecondsLeft(_ seconds: Int) {
+        guard state == .rec else { return }
+        secondsLeft = seconds
+        surface.present(PillAppearance(state: .rec, text: lastText, secondsLeft: seconds), repositionOnly: isVisible)
+    }
     public func showProcessing(_ preview: String = "") { show(.processing, preview) }
 
     public func showDone(words: Int) {
@@ -136,17 +151,26 @@ public final class PillController {
 
     public func showClipboardNotKept() { show(.clipboardNotKept, "Allow Paste from other apps to keep your clipboard") }
 
+    /// "A 68 s dictation is in History", for 4 s like the clipboard notice.
+    public func showRecovered(count: Int, seconds: Double) {
+        let text = count == 1 ? "A \(Int(seconds.rounded())) s dictation is in History" : "\(count) dictations are in History"
+        show(.recovered, text, hold: Self.clipboardNoticeHoldSeconds)
+    }
+
     public func hide() {
         cancelFeedback()
         surface.hide()
         isVisible = false
         state = nil
+        secondsLeft = nil
     }
 
     private func show(_ newState: PillState, _ text: String, hold holdOverride: Double? = nil) {
         cancelFeedback()
         surface.setAlpha(1)
+        if newState != .rec { secondsLeft = nil }
         state = newState
+        lastText = text
         let feedback = newState == .done || newState.isNotice
         if feedback {
             reducedMotion = reduceMotion()
@@ -154,7 +178,7 @@ public final class PillController {
             barHeights = [Double](repeating: Self.barMinHeight, count: Self.barCount)
         }
         surface.setCheckProgress(newState == .done ? (reducedMotion ? 1 : 0) : nil)
-        surface.present(PillAppearance(state: newState, text: text), repositionOnly: isVisible)
+        surface.present(PillAppearance(state: newState, text: text, secondsLeft: newState == .rec ? secondsLeft : nil), repositionOnly: isVisible)
         isVisible = true
         if feedback {
             let hold = holdOverride ?? (newState == .done ? Self.doneHoldSeconds : newState == .clipboardNotKept ? Self.clipboardNoticeHoldSeconds : Self.failureHoldSeconds)
@@ -212,7 +236,7 @@ public final class PillController {
                 let target = Self.barMinHeight + (Self.barMaxHeight - Self.barMinHeight) * wave * 0.55
                 barHeights[i] = barHeights[i] * 0.6 + target * 0.4
             }
-        case .pasteFailed, .hint, .clipboardNotKept:
+        case .pasteFailed, .hint, .clipboardNotKept, .recovered:
             barHeights = [Double](repeating: Self.barMinHeight, count: Self.barCount)
         }
         surface.setBarHeights(barHeights, color: PillAppearance(state: state, text: "").color)

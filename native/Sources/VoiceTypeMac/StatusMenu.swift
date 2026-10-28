@@ -1,13 +1,15 @@
 import AppKit
 import VoiceTypeCore
 
-/// The menu bar item: what Voice Type is doing, the microphone, permissions, the log, and
-/// Quit. Main thread only.
+/// The menu bar item: what Voice Type is doing, the microphone, settings, history,
+/// permissions, the log, and Quit. Main thread only.
 final class StatusMenu: NSObject, NSMenuDelegate {
     struct Actions {
         var chooseMicrophone: (String) -> Void
         var setEnabled: (Bool) -> Void
         var showPermissions: () -> Void
+        var showSettings: () -> Void
+        var showHistory: () -> Void
         var openLog: () -> Void
         var tryAgain: () -> Void
         var quit: () -> Void
@@ -17,6 +19,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     private let actions: Actions
     private let catalog: AudioDeviceCatalog
     private var status = NativeStatus(pid: getpid(), state: "starting")
+    /// Dictations recovered after a crash that haven't been looked at in History yet.
+    var recovered = 0
 
     init(actions: Actions, catalog: AudioDeviceCatalog) {
         self.actions = actions
@@ -76,6 +80,12 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             retry.target = self
             menu.addItem(retry)
         }
+        if recovered > 0 {
+            let item = NSMenuItem(title: recovered == 1 ? "Recovered a Dictation..." : "Recovered \(recovered) Dictations...",
+                                  action: #selector(showHistory), keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+        }
         if let last = status.lastDictation {
             let note = last.landed == false ? ", left on the clipboard" : ""
             let info = NSMenuItem(title: "Last: \(last.words) word\(last.words == 1 ? "" : "s") (\(last.status))\(note)", action: nil, keyEquivalent: "")
@@ -110,11 +120,18 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             menu.addItem(enabled)
         }
 
+        let history = NSMenuItem(title: "History...", action: #selector(showHistory), keyEquivalent: "y")
+        history.target = self
+        menu.addItem(history)
+        let settings = NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
         let missing = Permission.missing
-        let permissions = NSMenuItem(title: missing.isEmpty ? "Permissions..." : "Permissions (\(missing.count) missing)...",
-                                     action: #selector(showPermissions), keyEquivalent: "")
-        permissions.target = self
-        menu.addItem(permissions)
+        if !missing.isEmpty {
+            let permissions = NSMenuItem(title: "Permissions (\(missing.count) missing)...", action: #selector(showPermissions), keyEquivalent: "")
+            permissions.target = self
+            menu.addItem(permissions)
+        }
         let log = NSMenuItem(title: "Open Log", action: #selector(openLog), keyEquivalent: "")
         log.target = self
         menu.addItem(log)
@@ -127,6 +144,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     @objc private func chooseMicrophone(_ sender: NSMenuItem) { actions.chooseMicrophone(sender.representedObject as? String ?? "") }
     @objc private func toggleEnabled(_ sender: NSMenuItem) { actions.setEnabled(sender.state != .on) }
     @objc private func showPermissions() { actions.showPermissions() }
+    @objc private func showSettings() { actions.showSettings() }
+    @objc private func showHistory() { actions.showHistory() }
     @objc private func openLog() { actions.openLog() }
     @objc private func tryAgain() { actions.tryAgain() }
     @objc private func quit() { actions.quit() }

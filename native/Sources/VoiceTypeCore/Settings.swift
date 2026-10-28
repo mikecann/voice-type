@@ -14,6 +14,7 @@ public enum VoiceTypePaths {
 
     public static var settingsFile: URL { dataDirectory.appendingPathComponent("settings.json") }
     public static var recordingsDirectory: URL { dataDirectory.appendingPathComponent("recordings") }
+    public static var historyFile: URL { dataDirectory.appendingPathComponent("transcription-history.jsonl") }
     public static var defaultModel: URL {
         dataDirectory.appendingPathComponent("models/ggml-large-v3-turbo-q8_0.bin")
     }

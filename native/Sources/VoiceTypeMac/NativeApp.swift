@@ -1,5 +1,6 @@
 import AppKit
 import Synchronization
+import SwiftUI
 import VoiceTypeCore
 import VoiceTypeWhisper
 
@@ -27,8 +28,25 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
     private let statusQueue = DispatchQueue(label: "voice-type.status", qos: .utility)
     private let housekeeping = DispatchQueue(label: "voice-type.housekeeping", qos: .utility)
     private let catalog = CoreAudioCatalog()
-    private let permissionsWindow = PermissionsWindow()
+    /// Saving and transcribing, one dictation at a time. Recovery and History's "Transcribe
+    /// again" use it too, so they never overlap a dictation's own finalisation.
+    private let finaliseQueue = DispatchQueue(label: "voice-type.finalise", qos: .userInitiated)
     private var menu: StatusMenu!
+    // The windows, built when first opened and let go when closed (main thread).
+    private let settingsWindow: HostedWindow
+    private var settingsModel: SettingsModel?
+    private let historyWindow: HostedWindow
+    private var historyModel: HistoryModel?
+    /// The status as the menu last showed it, to fill the settings window when it opens.
+    private var shownStatus = NativeStatus(pid: getpid(), state: "starting")
+    /// On statusQueue: the controller's count of finished dictations, so the status file's
+    /// last dictation (and History) only change when a new one finishes.
+    private var dictationsSeen = 0
+    // Made with the controller.
+    private var archive: RecordingArchive?
+    private var recovery: DictationRecovery?
+    /// History's Transcribe Again is running (main thread).
+    private var transcribingAgain = false
     private var controller: DictationController?
     private var recorder: Recorder?
     private var tap: KeyboardTap?
@@ -60,6 +78,26 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
 
     private func log(_ message: String) { logFile.log(message) }
 
+    override init() {
+        // The views are made when a window opens, from whichever model is current then.
+        var app: NativeApp?
+        settingsWindow = HostedWindow(title: "Voice Type Native Settings", size: NSSize(width: 520, height: 500), minSize: NSSize(width: 460, height: 400),
+                                      autosaveName: "VoiceTypeNativeSettings") { AnyView(SettingsView(model: app!.settingsModel!)) }
+        historyWindow = HostedWindow(title: "Voice Type Native History", size: NSSize(width: 680, height: 560), minSize: NSSize(width: 520, height: 360),
+                                     autosaveName: "VoiceTypeNativeHistory") { AnyView(HistoryView(model: app!.historyModel!)) }
+        super.init()
+        app = self
+        settingsWindow.onClose = { [weak self] in
+            self?.settingsModel?.saveWordsNow()
+            self?.settingsModel = nil
+        }
+        historyWindow.onClose = { [weak self] in
+            self?.historyModel?.stopPlaying()
+            self?.historyModel = nil
+            ThumbnailCache.shared.removeAll()
+        }
+    }
+
     // MARK: Launch
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
@@ -72,19 +110,20 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
         menu = StatusMenu(actions: StatusMenu.Actions(
             chooseMicrophone: { [weak self] in self?.chooseMicrophone($0) },
             setEnabled: { [weak self] on in self?.onController { $0.setEnabled(on) } },
-            showPermissions: { [weak self] in self?.permissionsWindow.show() },
-            openLog: { [weak self] in if let url = self?.logFile.url { NSWorkspace.shared.open(url) } },
+            showPermissions: { [weak self] in self?.showSettings(.permissions) },
+            showSettings: { [weak self] in self?.showSettings() },
+            showHistory: { [weak self] in self?.showHistory() },
+            openLog: { [weak self] in self?.openLog() },
             tryAgain: { [weak self] in self?.tryAgain() },
             quit: { [weak self] in self?.quit() }
         ), catalog: catalog)
         publish(nil)
-        if Permission.missing.contains(where: \.isRequired) { permissionsWindow.show() }
         tryLock()
     }
 
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // Opening the app again (from Spotlight, say) shows the permissions; settings come in phase 3.
-        permissionsWindow.show()
+        // Opening the app again (from Spotlight, say) shows its settings.
+        showSettings()
         return false
     }
 
@@ -131,6 +170,9 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
     /// copy that dictates is always launchd's.
     private func startLaunchdCopyAndQuit() {
         log("Opened by hand; starting Voice Type Native's LaunchAgent instead of dictating from this copy.")
+        // If launchd's copy is already running, it opens its settings window, which is what
+        // opening the app is for. (A copy just starting doesn't hear this, and doesn't need to.)
+        Self.requestShow("settings")
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             do {
                 try LaunchAgents.start(launchControl)
@@ -147,6 +189,15 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
 
     private func lockAcquired() {
         log("Holding voice-type.instance.lock, so no other copy of Voice Type Native can dictate.")
+        housekeeping.async { [weak self] in self?.removeRetiredSettings() }
+        // Only the copy that dictates shows windows: a copy opened by hand quits once it has
+        // started launchd's, and would only flash one up first.
+        if Permission.missing.contains(where: \.isRequired) { showSettings(.permissions) }
+        // `voice-type-native show settings|history|...`, and a copy opened by hand while this
+        // one runs, ask through this.
+        DistributedNotificationCenter.default().addObserver(forName: Self.showNotification, object: nil, queue: .main) { [weak self] note in
+            self?.show(note.object as? String ?? "settings")
+        }
         repeating(every: 2, on: housekeeping) { [weak self] in self?.noteHealth() }
         let recent = history.recent()
         let plan = RestartBackoff.plan(recent, now: Date())
@@ -179,7 +230,10 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
         onController { $0.start() }
         startTap()
         observeSystem()
-        deviceWatcher = AudioDeviceWatcher { [weak self] in self?.onController { $0.audioDevicesChanged() } }
+        deviceWatcher = AudioDeviceWatcher { [weak self] in
+            self?.onController { $0.audioDevicesChanged() }
+            self?.refreshMicrophoneList()
+        }
         // Every hardware call on the controller's queue is bounded, so a ping that waits
         // 30 s means something unbounded hung there, holding the hotkey with it.
         let detector = StallDetector(timeout: 30, now: { ProcessInfo.processInfo.systemUptime },
@@ -257,7 +311,10 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
         let paster = Paster(pasteboard: GeneralPasteboard(), environment: MacPasteEnvironment(), now: uptime,
                             sleep: { Thread.sleep(forTimeInterval: $0) }, log: log)
         let archive = RecordingArchive(directory: VoiceTypePaths.recordingsDirectory)
-        let history = TranscriptionHistory(url: VoiceTypePaths.dataDirectory.appendingPathComponent("transcription-history.jsonl"))
+        let history = TranscriptionHistory(url: VoiceTypePaths.historyFile)
+        let recovery = DictationRecovery(archive: archive, history: history, transcriber: worker, log: log)
+        self.archive = archive
+        self.recovery = recovery
         let finaliser = Finaliser(transcriber: worker, pill: pill, paster: paster, archive: archive, history: history, log: log, now: uptime)
         let readiness = MicrophoneReadiness(probe: CoreAudioProbe(catalog: catalog), now: uptime, sleep: { Thread.sleep(forTimeInterval: $0) }, log: log)
         let ports = DictationController.Ports(
@@ -270,10 +327,13 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
             publish: { [weak self] snapshot in self?.publish(snapshot) },
             now: uptime, wallClock: Date.init,
             queue: QueueExecutor(controllerQueue),
-            finaliseLane: QueueExecutor(DispatchQueue(label: "voice-type.finalise", qos: .userInitiated)),
+            finaliseLane: QueueExecutor(finaliseQueue),
             readinessLane: QueueExecutor(DispatchQueue(label: "voice-type.readiness", qos: .userInitiated)),
             makeWatchdog: { name, timeout, fire in OperationWatchdog(name: name, timeout: timeout, onTimeout: fire) },
-            marks: makeScreenMarking(log: log, onMark: { worker.prepareWordTimings() })
+            marks: makeScreenMarking(log: log, onMark: { worker.prepareWordTimings() }),
+            spool: RecordingSpool(directory: VoiceTypePaths.recordingsDirectory, log: log),
+            recovery: recovery,
+            recovered: { [weak self] found in DispatchQueue.main.async { self?.noteRecovered(found) } }
         )
         controller = DictationController(ports: ports)
     }
@@ -347,6 +407,7 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
         let tapStatus = tap?.status.rawValue ?? KeyboardTap.Status.notStarted.rawValue
         if let snapshot { tap?.setSwallowing(snapshot.swallowsHotkeys) }
         statusQueue.async { [self] in
+            var finished = false
             if let snapshot {
                 status.state = snapshot.phase.rawValue
                 status.message = snapshot.message
@@ -355,7 +416,10 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
                 status.microphone = snapshot.microphone
                 status.preferredMicrophone = snapshot.preferredMicrophone
                 status.finalizeInFlight = snapshot.finalizeInFlight
-                if let last = snapshot.lastDictation {
+                // Every snapshot carries the last dictation; only a new one gets a new time.
+                if let last = snapshot.lastDictation, snapshot.dictationsFinished != dictationsSeen {
+                    dictationsSeen = snapshot.dictationsFinished
+                    finished = true
                     status.lastDictation = NativeStatus.LastDictation(at: Timestamp(Date()).utcISOFormat, status: last.status,
                                                                       seconds: last.durationSec, words: last.words, landed: last.landed)
                 }
@@ -378,8 +442,17 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
             if holdsLock {
                 do { try shown.write() } catch { logFile.log("Status file write failed: \(error.localizedDescription)") }
             }
-            DispatchQueue.main.async { self.menu?.update(shown) }
+            DispatchQueue.main.async { self.shown(shown, dictationFinished: finished) }
         }
+    }
+
+    /// On the main thread: the menu, the settings window, and the history when a dictation
+    /// has finished while it's open.
+    private func shown(_ status: NativeStatus, dictationFinished: Bool) {
+        shownStatus = status
+        menu?.update(status)
+        settingsModel?.update(status: status)
+        if dictationFinished { historyModel?.reload() }
     }
 
     private func writeFinalStatus(_ state: String) {
@@ -453,12 +526,7 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 switch number {
                 case SIGUSR1:
-                    // Asked for, so not a failure: it doesn't count towards the backoff, and
-                    // it's the way out of giving up after a fix (the build script sends it).
-                    self.log("Restart requested from the command line; restarting once idle.")
-                    self.history.clear()
-                    guard self.controller != nil else { self.exitForRestart(); return }
-                    self.onController { $0.whenIdle("Restarting") { self.exitForRestart() } }
+                    self.restartWhenIdle("Restart requested from the command line; restarting once idle.")
                 default:
                     self.log("Signal SIGTERM received; shutting down.")
                     guard self.controller != nil else { self.quitNow("Stopped by launchd.") }
@@ -471,9 +539,174 @@ public final class NativeApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Asked for (from the command line or the settings window), so not a failure: it doesn't
+    /// count towards the backoff, and it's the way out of giving up after a fix (the build
+    /// script sends SIGUSR1).
+    private func restartWhenIdle(_ why: String) {
+        log(why)
+        history.clear()
+        guard controller != nil else { exitForRestart(); return }
+        onController { $0.whenIdle("Restarting") { self.exitForRestart() } }
+    }
+
+    // MARK: Windows
+
+    static let showNotification = Notification.Name("com.mikerosoft.voice-type-native.show")
+
+    /// Asks the running copy to open a window: settings, words, permissions or history.
+    public static func requestShow(_ what: String) {
+        DistributedNotificationCenter.default().postNotificationName(showNotification, object: what, userInfo: nil, deliverImmediately: true)
+    }
+
+    private func show(_ what: String) {
+        switch what {
+        case "history": showHistory()
+        case "words": showSettings(.words)
+        case "permissions": showSettings(.permissions)
+        default: showSettings(Permission.missing.contains(where: \.isRequired) ? .permissions : .general)
+        }
+    }
+
+    private func showSettings(_ tab: SettingsModel.Tab? = nil) {
+        let model = settingsModel ?? makeSettingsModel()
+        if settingsModel == nil {
+            settingsModel = model
+            model.reload(status: shownStatus)
+        }
+        if let tab { model.tab = tab }
+        settingsWindow.show()
+    }
+
+    private func makeSettingsModel() -> SettingsModel {
+        SettingsModel(actions: SettingsModel.Actions(
+            setEnabled: { [weak self] on in self?.onController { $0.setEnabled(on) } },
+            chooseMicrophone: { [weak self] in self?.chooseMicrophone($0) },
+            update: { [weak self] change, then in self?.updateSettings(change, then: then) },
+            openLog: { [weak self] in self?.openLog() },
+            openDataFolder: { NSWorkspace.shared.open(VoiceTypePaths.dataDirectory) },
+            restart: { [weak self] in self?.restartWhenIdle("Restart requested from the settings window; restarting once idle.") }
+        ), catalog: catalog)
+    }
+
+    private func showHistory() {
+        menu?.recovered = 0
+        if historyModel == nil {
+            let model = HistoryModel(actions: HistoryModel.Actions(
+                load: { done in
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        let items = DictationHistory.load(recordings: VoiceTypePaths.recordingsDirectory, historyFile: VoiceTypePaths.historyFile)
+                        DispatchQueue.main.async { done(items) }
+                    }
+                },
+                retranscribe: { [weak self] id, done in self?.transcribeAgain(id, done) },
+                fix: { [weak self] id, text, done in self?.saveFix(id, text, done) }
+            ))
+            historyModel = model
+            model.reload()
+        }
+        historyWindow.show()
+    }
+
+    /// On the finalise queue, after any dictation being finalised. Needs the model, so not
+    /// before the controller is made.
+    private func transcribeAgain(_ id: String, _ done: @escaping (String?) -> Void) {
+        // One at a time, here rather than in the window, so closing and reopening History
+        // can't queue another behind it.
+        guard let recovery, let archive, !transcribingAgain else {
+            done(nil)
+            return
+        }
+        transcribingAgain = true
+        // Like everything on the finalise queue, under a watchdog of its own, timed like a
+        // dictation of the same length: a dictation queued behind it only starts its own
+        // when it runs.
+        let seconds = archive.entry(id)?["duration_seconds"].flatMap { Double($0.numberLiteral ?? "") } ?? Deadlines.maxRecording
+        let timeout = Deadlines.finalisation(durationSec: seconds)
+        let watchdog = OperationWatchdog(name: "transcribe-again", timeout: timeout) { [weak self] in
+            self?.restartAfterFailure(String(format: "Transcribing %@ again took over %.0fs; restarting with a fresh native backend", id, timeout))
+        }
+        finaliseQueue.async { [weak self] in
+            watchdog.start()
+            var text: String?
+            do { text = try recovery.retranscribe(id, settings: SettingsFile.load()) } catch {
+                self?.log("Transcribing \(id) again failed: \(error.localizedDescription)")
+            }
+            watchdog.complete()
+            DispatchQueue.main.async {
+                self?.transcribingAgain = false
+                done(text)
+            }
+        }
+    }
+
+    private func saveFix(_ id: String, _ text: String, _ done: @escaping (Bool) -> Void) {
+        let archive = self.archive ?? RecordingArchive(directory: VoiceTypePaths.recordingsDirectory)
+        housekeeping.async { [weak self] in
+            var saved = true
+            do {
+                try DictationLabels.save(text, for: id, archive: archive)
+                self?.log("Fixed \(id) as \(pythonRepr(text)); kept a copy in labelled/.")
+            } catch {
+                saved = false
+                self?.log("Couldn't save the fix for \(id): \(error.localizedDescription)")
+            }
+            DispatchQueue.main.async { done(saved) }
+        }
+    }
+
+    private func noteRecovered(_ found: [RecoveredDictation]) {
+        let withWords = found.filter { !$0.text.isEmpty }.count
+        guard withWords > 0 else { return }
+        if historyWindow.isOpen {
+            historyModel?.reload()
+        } else {
+            menu?.recovered += withWords
+        }
+    }
+
+    private func openLog() { NSWorkspace.shared.open(logFile.url) }
+
+    /// A microphone came or went: the settings window's list follows.
+    private func refreshMicrophoneList() {
+        DispatchQueue.main.async { [weak self] in self?.settingsModel?.refreshMicrophones() }
+    }
+
+    // MARK: Settings
+
+    /// Every settings.json change from the app goes through here, one at a time, so the
+    /// settings window and the menu never undo each other. The controller picks the change
+    /// up at the next key-down.
+    private func updateSettings(_ change: @escaping (inout SettingsFile) -> Void, then: ((SettingsFile) -> Void)? = nil) {
+        housekeeping.async { [weak self] in
+            guard let self else { return }
+            var settings = SettingsFile.load()
+            let before = settings.serialized
+            change(&settings)
+            if settings.serialized != before {
+                do { try settings.save() } catch { self.log("Settings save failed: \(error.localizedDescription)") }
+            }
+            let saved = settings
+            if let then { DispatchQueue.main.async { then(saved) } }
+        }
+    }
+
+    /// The Python version's own settings (models, modes, the formatter) went with it.
+    private func removeRetiredSettings() {
+        var settings = SettingsFile.load()
+        let removed = settings.removeRetiredKeys()
+        guard !removed.isEmpty else { return }
+        do {
+            try settings.save()
+            log("Removed settings only the Python version used: \(removed.joined(separator: ", ")).")
+        } catch {
+            log("Settings save failed: \(error.localizedDescription)")
+        }
+    }
+
     // MARK: Menu actions
 
     private func chooseMicrophone(_ name: String) {
+        // On the settings queue (housekeeping), like every other settings change.
         housekeeping.async { [weak self] in
             guard let self else { return }
             var settings = SettingsFile.load()

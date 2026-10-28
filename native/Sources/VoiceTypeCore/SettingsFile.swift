@@ -39,7 +39,7 @@ public struct SettingsFile: Sendable {
     /// Off unless set, as in Python's setdefault.
     public var audioRecordingEnabled: Bool { json["audio_recording_enabled"]?.isTruthy ?? false }
 
-    /// Read now so phase 2 can follow it; native doesn't draw yet.
+    /// Drawing on screen while the key is held. On unless set.
     public var drawOnScreenEnabled: Bool { json["draw_on_screen_enabled"]?.isTruthy ?? true }
 
     /// The vocabulary as Python's `list(_settings.get("vocabulary", []))` would store it in a
@@ -62,6 +62,79 @@ public struct SettingsFile: Sendable {
     public var markerTimings: MarkerTimings {
         guard let value = native("marker_timings")?.stringValue else { return .accurate }
         return MarkerTimings(rawValue: PythonText.strip(value).lowercased()) ?? .accurate
+    }
+
+    // MARK: The settings window's edits
+
+    /// The word list as the settings window edits it: what Whisper is primed with now.
+    public var vocabularyWords: [String] { dictation.vocabulary ?? [] }
+
+    /// Saves the word list, trimmed, without blanks or repeats, in the order given.
+    public mutating func setVocabulary(_ words: [String]) {
+        var seen = Set<String>()
+        let cleaned = words.map { PythonText.strip($0) }.filter { !$0.isEmpty && seen.insert($0).inserted }
+        set("vocabulary", .strings(cleaned))
+    }
+
+    /// The corrections in the order they run, as the settings window edits them.
+    public var correctionPairs: [(heard: String, typed: String)] {
+        dictation.corrections.pairs.map { (heard: $0.wrong, typed: $0.right) }
+    }
+
+    /// Saves the corrections in the order given. Blank "heard" rows are dropped, and a
+    /// repeated one keeps its first place, since a JSON object can only have each key once.
+    public mutating func setCorrections(_ pairs: [(heard: String, typed: String)]) {
+        var seen = Set<String>()
+        var object: [(key: String, value: JSONValue)] = []
+        for pair in pairs {
+            let heard = PythonText.strip(pair.heard)
+            guard !heard.isEmpty, seen.insert(heard).inserted else { continue }
+            object.append((heard, .string(PythonText.strip(pair.typed))))
+        }
+        set("corrections", .object(object))
+    }
+
+    /// The settings window's word list edits, laid over the file as it is now: words it
+    /// removed are taken out and words it added go on the end, so a word put in settings.json
+    /// by hand (or by an agent) while the window was open isn't lost. With no change from
+    /// outside, the window's list is saved as it is.
+    public mutating func applyVocabularyEdit(from base: [String], to edited: [String]) {
+        let current = vocabularyWords
+        guard current != base else { return setVocabulary(edited) }
+        let kept = Set(edited.map(PythonText.strip))
+        let before = Set(base)
+        let removed = before.subtracting(kept)
+        let added = edited.map(PythonText.strip).filter { !before.contains($0) }
+        setVocabulary(current.filter { !removed.contains($0) } + added)
+    }
+
+    /// The same for corrections, by what's heard: removed ones go, changed and new ones are
+    /// set, and anything else in the file stays where it is.
+    public mutating func applyCorrectionsEdit(from base: [(heard: String, typed: String)], to edited: [(heard: String, typed: String)]) {
+        let current = correctionPairs
+        let same = current.count == base.count && zip(current, base).allSatisfy { $0.heard == $1.heard && $0.typed == $1.typed }
+        guard !same else { return setCorrections(edited) }
+        let cleaned = edited.map { (heard: PythonText.strip($0.heard), typed: PythonText.strip($0.typed)) }.filter { !$0.heard.isEmpty }
+        let before = Dictionary(base.map { ($0.heard, $0.typed) }, uniquingKeysWith: { first, _ in first })
+        let after = Dictionary(cleaned.map { ($0.heard, $0.typed) }, uniquingKeysWith: { first, _ in first })
+        var result = current.filter { before[$0.heard] == nil || after[$0.heard] != nil }
+            .map { pair in (heard: pair.heard, typed: before[pair.heard] != after[pair.heard] ? after[pair.heard] ?? pair.typed : pair.typed) }
+        for pair in cleaned where before[pair.heard] != pair.typed && !result.contains(where: { $0.heard == pair.heard }) {
+            result.append(pair)
+        }
+        setCorrections(result)
+    }
+
+    /// Keys only the Python version read: its model and mode choices and the formatter, which
+    /// native dropped. Nothing reads them now.
+    public static let retiredKeys = ["final_model", "stream_model", "output_mode", "formatter_enabled", "formatter_model", "formatter_system_prompt"]
+
+    /// Removes the retired keys, returning which were there.
+    @discardableResult
+    public mutating func removeRetiredKeys() -> [String] {
+        let present = Self.retiredKeys.filter { json[$0] != nil }
+        for key in present { json.remove(key) }
+        return present
     }
 
     public mutating func set(_ key: String, _ value: JSONValue) {

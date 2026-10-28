@@ -57,9 +57,11 @@ public final class RecordingArchive: @unchecked Sendable {
 
     /// Saves a capture with status "captured" and returns its id. `metadata` comes first in
     /// the JSON, then the archive's own fields, as `{**metadata, 'id': ...}` orders them.
+    /// `capturedAt` is for a dictation recovered after a crash, which keeps the time it was
+    /// really captured rather than the time it was found.
     @discardableResult
-    public func save(_ samples: [Float], sampleRate: Int, metadata: [(key: String, value: JSONValue)]) throws -> String {
-        let now = Timestamp(clock())
+    public func save(_ samples: [Float], sampleRate: Int, metadata: [(key: String, value: JSONValue)], capturedAt: Date? = nil) throws -> String {
+        let now = Timestamp(capturedAt ?? clock())
         let id = "\(now.recordingIDPrefix)_\(makeHexID())"
         var entry = JSONValue.object(metadata)
         entry.update(with: [
@@ -127,7 +129,9 @@ public final class RecordingArchive: @unchecked Sendable {
         let hex = rest.prefix(32)
         guard hex.count == 32, hex.utf8.allSatisfy({ (0x30...0x39).contains($0) || (0x61...0x66).contains($0) }) else { return nil }
         let suffix = rest.dropFirst(32)
-        guard [".wav", ".json", ".wav.tmp", ".json.tmp"].contains(String(suffix)) else { return nil }
+        // .wav.partial is audio written while the key was held (RecordingSpool), left behind
+        // by a crash and never recovered.
+        guard [".wav", ".json", ".wav.tmp", ".json.tmp", ".wav.partial"].contains(String(suffix)) else { return nil }
         return Timestamp.parseRecordingIDPrefix(String(parts[0]))
     }
 

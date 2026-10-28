@@ -28,9 +28,14 @@ case "serve": cli.serve()
 case "replay": cli.replay()
 case "tokens": cli.tokens()
 case "composite": cli.composite()
+case "history": cli.history()
 case "status": service.status()
+case "show": service.show()
 case "restart": service.restart()
 case "launch-agent-plist": service.launchAgentPlist()
+case "snapshot-windows":
+    guard let dir = options.positional.first else { fail("snapshot-windows needs a folder to write the PNGs to") }
+    do { try WindowSnapshots.render(to: URL(fileURLWithPath: dir)) } catch { fail(error.localizedDescription, code: 1) }
 case "":
     print(usage)
     exit(2)

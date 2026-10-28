@@ -120,6 +120,18 @@ public extension JSONValue {
         return nil
     }
 
+    /// A number's literal, as written.
+    var numberLiteral: String? {
+        if case let .number(literal) = self { return literal }
+        return nil
+    }
+
+    /// Deletes a key from an object, keeping the others in order.
+    mutating func remove(_ key: String) {
+        guard case let .object(pairs) = self else { return }
+        self = .object(pairs.filter { $0.key != key })
+    }
+
     var boolValue: Bool? {
         if case let .bool(b) = self { return b }
         return nil

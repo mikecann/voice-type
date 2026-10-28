@@ -25,6 +25,8 @@ extension InferenceWorker: Transcribing {}
 /// thread and calls PillController.
 public protocol PillPresenting: AnyObject, Sendable {
     func showRecording(_ preview: String)
+    /// The last seconds before the 120 s cap.
+    func showSecondsLeft(_ seconds: Int)
     func showProcessing(_ preview: String)
     func showDone(words: Int)
     /// Words and screenshots pasted, for a dictation with screen marks.
@@ -35,6 +37,8 @@ public protocol PillPresenting: AnyObject, Sendable {
     func showScreenRecordingHint()
     /// The paste landed, but the old clipboard couldn't be read, so it wasn't put back.
     func showClipboardNotKept()
+    /// Dictations an earlier run left behind were transcribed and are in History.
+    func showRecovered(count: Int, seconds: Double)
     func hide()
 }
 
@@ -76,6 +80,9 @@ public struct FinaliseJob: Sendable {
     /// What was drawn while the key was held, if anything. Without marks the dictation goes
     /// exactly as it always did.
     public var marks: DictationMarks?
+    /// Deletes the copy of the audio written while the key was held, once the recording is
+    /// saved properly.
+    public var discardSpooled: (@Sendable () -> Void)?
 
     public init(samples: [Float], metadata: [(key: String, value: JSONValue)], preview: String, target: TargetApp?,
                 settings: SettingsFile, keyUpAt: Double, stopAudioSeconds: Double, keyHoldSeconds: Double = 0, marks: DictationMarks? = nil) {
@@ -106,6 +113,8 @@ public struct FinaliseOutcome: Equatable, Sendable {
 /// from _run_archived_finalization, _finish_dictation, _finish_one_shot and transcribe().
 public final class Finaliser: @unchecked Sendable {
     public static let mode = "final_only"
+    /// What a recording's "engine" field says.
+    public static let engineName = "whisper.cpp b5454 ggml-large-v3-turbo-q8_0"
 
     private let transcriber: Transcribing
     private let pill: PillPresenting
@@ -142,6 +151,9 @@ public final class Finaliser: @unchecked Sendable {
                 log("Recording audio save failed: \(error.localizedDescription)")
             }
         }
+        // Saved, or the disk wouldn't take it: either way the partial copy is done with. Left
+        // there, it would be transcribed again as a recovered dictation at the next launch.
+        job.discardSpooled?()
         func update(_ fields: [(key: String, value: JSONValue)]) {
             if let status = fields.first(where: { $0.key == "status" })?.value.stringValue { outcome.status = status }
             guard let recordingID else { return }

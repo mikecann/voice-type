@@ -41,6 +41,29 @@ struct CLI {
         options.raw ? try pipeline.runEngineOnly(samples) : try pipeline.run(samples)
     }
 
+    // MARK: history
+
+    /// The History window's list, newest first, for checking it against the files.
+    func history() {
+        let limit = options.positional.first.flatMap(Int.init) ?? 20
+        let started = Date()
+        let items = DictationHistory.load(recordings: options.recordings, historyFile: VoiceTypePaths.historyFile)
+        let took = Date().timeIntervalSince(started)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        for item in items.prefix(limit) {
+            var notes: [String] = []
+            if let seconds = item.durationSec { notes.append(String(format: "%.1fs", seconds)) }
+            if item.audioURL == nil { notes.append("no audio") }
+            if !item.screenshots.isEmpty { notes.append("\(item.screenshots.count) shot(s)") }
+            if item.recovered { notes.append("recovered") }
+            if item.correctedText != nil { notes.append("fixed") }
+            let text = item.bestText.isEmpty ? "(\(item.outcome))" : item.bestText
+            print("\(formatter.string(from: item.date))  [\(notes.joined(separator: ", "))]  \(text)")
+        }
+        FileHandle.standardError.write(Data(String(format: "%d dictations, read in %.0f ms\n", items.count, took * 1000).utf8))
+    }
+
     // MARK: transcribe
 
     func transcribe() {

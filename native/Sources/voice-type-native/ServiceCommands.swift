@@ -93,6 +93,17 @@ struct ServiceCommands {
     }
 
     /// Prints the LaunchAgent for an installed app, for the build script.
+    /// Opens one of the running app's windows. Nothing happens if it isn't running.
+    func show() {
+        let what = options.positional.first ?? "settings"
+        guard ["settings", "words", "permissions", "history"].contains(what) else {
+            fail("show takes settings, words, permissions or history, not \(what)")
+        }
+        NativeApp.requestShow(what)
+        // The notification is delivered asynchronously; give it a moment before exiting.
+        Thread.sleep(forTimeInterval: 0.2)
+    }
+
     func launchAgentPlist() {
         guard let executable = options.positional.first else { fail("launch-agent-plist needs the app's executable path") }
         print(LaunchAgents.nativePlistContents(executable: executable), terminator: "")

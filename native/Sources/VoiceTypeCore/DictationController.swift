@@ -10,6 +10,9 @@ public struct ControllerSnapshot: Equatable, Sendable {
     public var preferredMicrophone: String
     public var finalizeInFlight: Bool
     public var lastDictation: FinaliseOutcome?
+    /// How many dictations have finished in this run, so a new one can be told from the
+    /// same one published again.
+    public var dictationsFinished = 0
 
     /// Whether the keyboard tap should swallow F12 and Right Control. Not while paused or
     /// without a model: dictation won't happen, so the keys keep their usual jobs. While
@@ -63,6 +66,12 @@ public final class DictationController: @unchecked Sendable {
         public var makeWatchdog: (String, Double, @escaping @Sendable () -> Void) -> OperationWatchdog
         /// Drawing while dictating; nil without a mouse tap (or in tests that don't draw).
         public var marks: MarkSessions?
+        /// Writes the audio to disk while the key is held, so a crash can't lose it.
+        public var spool: RecordingSpool?
+        /// Finishes dictations an earlier run left behind, once the model is loaded.
+        public var recovery: DictationRecovery?
+        /// Told about dictations recovery finished, for the menu. Any thread.
+        public var recovered: ([RecoveredDictation]) -> Void
 
         public init(recorder: Recorder, transcriber: Transcribing, readiness: MicrophoneReadiness, pill: PillPresenting,
                     finaliser: Finaliser, frontmostApp: @escaping () -> TargetApp?, archive: RecordingArchive,
@@ -71,7 +80,8 @@ public final class DictationController: @unchecked Sendable {
                     now: @escaping () -> Double, wallClock: @escaping () -> Date, queue: Executor & Scheduler,
                     finaliseLane: Executor, readinessLane: Executor,
                     makeWatchdog: @escaping (String, Double, @escaping @Sendable () -> Void) -> OperationWatchdog,
-                    marks: MarkSessions? = nil) {
+                    marks: MarkSessions? = nil, spool: RecordingSpool? = nil, recovery: DictationRecovery? = nil,
+                    recovered: @escaping ([RecoveredDictation]) -> Void = { _ in }) {
             self.recorder = recorder
             self.transcriber = transcriber
             self.readiness = readiness
@@ -90,6 +100,9 @@ public final class DictationController: @unchecked Sendable {
             self.readinessLane = readinessLane
             self.makeWatchdog = makeWatchdog
             self.marks = marks
+            self.spool = spool
+            self.recovery = recovery
+            self.recovered = recovered
         }
     }
 
@@ -101,6 +114,7 @@ public final class DictationController: @unchecked Sendable {
         var captureReadyDelay: Double
         var firstAudioDelay: Double?
         var settings: SettingsFile
+        var spooled: RecordingSpool.Session?
     }
 
     public static let previewInterval = 0.5
@@ -115,6 +129,8 @@ public final class DictationController: @unchecked Sendable {
     /// The plan's budget from key-down to recording is 20 ms; a start ten times that gets a
     /// line in the log.
     public static let slowMicrophoneStart = 0.2
+    /// The pill counts down this many seconds before the 120 s cap stops a recording.
+    public static let capCountdownSeconds = 10
 
     private let ports: Ports
     public private(set) var phase: Phase = .starting
@@ -130,6 +146,7 @@ public final class DictationController: @unchecked Sendable {
     private var generation = 0
     private var recording: ActiveRecording?
     private var capTimer: Cancellable?
+    private var countdownTimer: Cancellable?
     private var previewTimer: Cancellable?
     private var lastPreview = ""
     private var previewPasses = 0
@@ -144,6 +161,7 @@ public final class DictationController: @unchecked Sendable {
     private var loadWatchdog: OperationWatchdog?
     private var finalWatchdog: OperationWatchdog?
     private var lastDictation: FinaliseOutcome?
+    private var dictationsFinished = 0
 
     private var pendingWake = false
     private var pendingDeviceCheck = false
@@ -151,6 +169,10 @@ public final class DictationController: @unchecked Sendable {
     private var pendingIdleAction: (label: String, work: () -> Void)?
     private var lastWall: Date
     private var lastCleanup = -Double.infinity
+    private var recoveryStarted = false
+    /// Recovery is transcribing on the finalise lane. A restart or Quit waits for it, as it
+    /// waits for a dictation, so it doesn't cut a recovery off halfway.
+    private var recovering = false
 
     public init(ports: Ports) {
         self.ports = ports
@@ -161,13 +183,16 @@ public final class DictationController: @unchecked Sendable {
             guard let self else { return }
             self.ports.queue.run { self.firstAudio() }
         }
+        if let spool = ports.spool {
+            ports.recorder.onRecordedAudio = { spool.append($0) }
+        }
     }
 
     public var snapshot: ControllerSnapshot {
         ControllerSnapshot(
             phase: phase, enabled: enabled, message: message, modelState: ports.transcriber.modelState,
             microphone: ports.recorder.actualDeviceName, preferredMicrophone: settings.microphoneName,
-            finalizeInFlight: phase == .finalising, lastDictation: lastDictation
+            finalizeInFlight: phase == .finalising, lastDictation: lastDictation, dictationsFinished: dictationsFinished
         )
     }
 
@@ -196,6 +221,7 @@ public final class DictationController: @unchecked Sendable {
         case .success:
             ports.log("Final model ready.")
             modelReady = true
+            startRecovery()
             checkPreparationDone()
         case let .failure(error as ModelFileMissing):
             ports.log("Speech model missing: \(error.path). Run native/scripts/build-app.sh to install it.")
@@ -242,9 +268,11 @@ public final class DictationController: @unchecked Sendable {
             let watchdog = ports.makeWatchdog("wake-warm-up", Deadlines.wakeWarmUp) { [ports] in
                 ports.restartProcess("The warm-up pass after wake took over \(Int(Deadlines.wakeWarmUp))s; restarting with a fresh Metal backend")
             }
-            watchdog.start()
             let transcriber = ports.transcriber
             ports.finaliseLane.run { [weak self] in
+                // Timed from when it runs, not when it was queued: recovery or History's
+                // "Transcribe again" may be ahead of it on the lane, each under its own watchdog.
+                watchdog.start()
                 let started = self?.ports.now() ?? 0
                 let ok = (try? transcriber.run { engine, _ in
                     _ = try engine.transcribe([Float](repeating: 0, count: sampleRate / 2), options: TranscribeOptions())
@@ -391,10 +419,14 @@ public final class DictationController: @unchecked Sendable {
         // the one thing left that can fail, abandons the session below.
         let marks = settings.drawOnScreenEnabled ? ports.marks : nil
         marks?.begin(wordTimings: settings.markerTimings == .accurate)
+        // Before the microphone, so the spool is there for the very first block. Only when
+        // recordings are kept: it's the same audio, written sooner.
+        let spooled = settings.audioRecordingEnabled ? ports.spool?.begin() : nil
         let result = ports.recorder.start()
         let ready = ports.now() - downSince
         guard case let .started(reused) = result else {
             marks?.abandon()
+            if let spooled { ports.spool?.discard(spooled) }
             if case let .failed(why) = result {
                 ports.log("Microphone stream could not open: \(why). Voice Type will reconnect the microphone.")
             }
@@ -416,12 +448,14 @@ public final class DictationController: @unchecked Sendable {
         marks?.microphoneStarted(audioOrigin: downSince + ready)
         phase = .recording
         recording = ActiveRecording(generation: generation, downSince: downSince, target: target, captureReadyDelay: ready,
-                                    firstAudioDelay: nil, settings: settings)
+                                    firstAudioDelay: nil, settings: settings, spooled: spooled)
         lastPreview = ""
         previewPasses = 0
         previewSeconds = 0
         let gen = generation
+        let capAt = ports.now() + Deadlines.maxRecording
         capTimer = ports.queue.schedule(after: Deadlines.maxRecording) { [weak self] in self?.capReached(gen) }
+        countdown(gen, from: Self.capCountdownSeconds, capAt: capAt)
         schedulePreview(gen)
         publish()
     }
@@ -431,6 +465,16 @@ public final class DictationController: @unchecked Sendable {
         active.firstAudioDelay = ports.now() - active.downSince
         recording = active
         ports.pill.showRecording("")
+    }
+
+    /// Schedules the pill's "10s", "9s", ... up to the cap, one second apart.
+    private func countdown(_ gen: Int, from seconds: Int, capAt: Double) {
+        guard seconds > 0 else { return }
+        countdownTimer = ports.queue.schedule(after: max(0, capAt - Double(seconds) - ports.now())) { [weak self] in
+            guard let self, self.phase == .recording, gen == self.generation else { return }
+            self.ports.pill.showSecondsLeft(seconds)
+            self.countdown(gen, from: seconds - 1, capAt: capAt)
+        }
     }
 
     private func capReached(_ gen: Int) {
@@ -500,6 +544,7 @@ public final class DictationController: @unchecked Sendable {
     private func finishRecording() {
         guard let active = recording else { return }
         capTimer?.cancel()
+        countdownTimer?.cancel()
         previewTimer?.cancel()
         let marks = ports.marks?.finish()
         ports.log("--- Key UP ---")
@@ -515,6 +560,9 @@ public final class DictationController: @unchecked Sendable {
         let keyHold = keyUpAt - active.downSince
         let samples = ports.recorder.stop()
         let stopTook = ports.now() - keyUpAt
+        // The last block came in before stop() returned. The file stays until the finaliser
+        // has saved the recording.
+        if let spooled = active.spooled { ports.spool?.end(spooled) }
         recording = nil
         phase = .finalising
 
@@ -533,7 +581,7 @@ public final class DictationController: @unchecked Sendable {
         ]
         if let marks { metadata.append(("mark_count", .int(marks.strokes.count))) }
         metadata.append(("app", .string("native")))
-        metadata.append(("engine", .string("whisper.cpp b5454 ggml-large-v3-turbo-q8_0")))
+        metadata.append(("engine", .string(Finaliser.engineName)))
 
         let duration = Double(samples.count) / Double(sampleRate)
         let timeout = Deadlines.finalisation(durationSec: duration, marks: marks?.strokes.count ?? 0)
@@ -541,12 +589,18 @@ public final class DictationController: @unchecked Sendable {
             ports.restartProcess(String(format: "Final transcription exceeded %.1fs; restarting with a fresh native backend (automatic retry is disabled to avoid duplicate injection)", timeout))
         }
         finalWatchdog = watchdog
-        watchdog.start()
-        let job = FinaliseJob(samples: samples, metadata: metadata, preview: PreviewFormat.wrap(lastPreview), target: active.target,
+        var job = FinaliseJob(samples: samples, metadata: metadata, preview: PreviewFormat.wrap(lastPreview), target: active.target,
                               settings: s, keyUpAt: keyUpAt, stopAudioSeconds: stopTook, keyHoldSeconds: keyHold, marks: marks)
+        if let spooled = active.spooled, let spool = ports.spool {
+            job.discardSpooled = { spool.discardNow(spooled) }
+        }
+        let finalJob = job
         let finaliser = ports.finaliser
         ports.finaliseLane.run { [weak self] in
-            let outcome = finaliser.run(job)
+            // Timed from when it starts, like the warm-up: anything ahead of it on the lane has
+            // its own watchdog, so the lane can't stay stuck.
+            watchdog.start()
+            let outcome = finaliser.run(finalJob)
             guard let self else { return }
             self.ports.queue.run { self.finalisationFinished(outcome) }
         }
@@ -561,6 +615,7 @@ public final class DictationController: @unchecked Sendable {
         finalWatchdog = nil
         ports.transcriber.endFinal()
         lastDictation = outcome
+        dictationsFinished += 1
         phase = .idle
         if ports.recorder.restartRequired {
             ports.restartProcess("Core Audio capture needs recovery; relaunching before another microphone stream is opened")
@@ -575,6 +630,53 @@ public final class DictationController: @unchecked Sendable {
         }
         publish()
         runPendingIdleWork()
+    }
+
+    // MARK: Recovery
+
+    /// Once per run, when the model is first ready: dictations an earlier run left behind
+    /// are transcribed on the finalise lane (so a dictation made meanwhile just queues behind
+    /// them), each under its own watchdog. A watchdog that fires restarts the app, and the
+    /// recording isn't tried again, since recovery marks it first.
+    private func startRecovery() {
+        guard let recovery = ports.recovery, !recoveryStarted else { return }
+        recoveryStarted = true
+        recovering = true
+        let settings = self.settings
+        let ports = self.ports
+        ports.finaliseLane.run { [weak self] in
+            var recovered: [RecoveredDictation] = []
+            for item in recovery.prepare(settings: settings) {
+                let timeout = Deadlines.finalisation(durationSec: item.durationSec)
+                let watchdog = ports.makeWatchdog("recovery", timeout) {
+                    ports.restartProcess(String(format: "Recovering dictation %@ took over %.0fs; restarting (it won't be tried again)", item.id, timeout))
+                }
+                watchdog.start()
+                if let done = recovery.recover(item, settings: settings) { recovered.append(done) }
+                watchdog.complete()
+            }
+            guard let self else { return }
+            let done = recovered
+            self.ports.queue.run { self.recoveryFinished(done) }
+        }
+    }
+
+    private func recoveryFinished(_ recovered: [RecoveredDictation]) {
+        recovering = false
+        if !recovered.isEmpty { ports.recovered(recovered) }
+        let withWords = recovered.filter { !$0.text.isEmpty }
+        // Only on a quiet pill: not over a dictation, or the start-up messages someone's reading.
+        if !withWords.isEmpty, phase == .idle || phase == .starting, !noticeRevealed {
+            ports.pill.showRecovered(count: withWords.count, seconds: withWords.map(\.durationSec).reduce(0, +))
+        }
+        // A restart or Quit asked for while it ran, now that nothing's left half done.
+        if let action = pendingIdleAction, [.idle, .starting, .needsModel].contains(phase) {
+            pendingIdleAction = nil
+            cancelReadiness?.set()
+            phase = .stopping
+            publish()
+            action.work()
+        }
     }
 
     // MARK: System events
@@ -651,6 +753,11 @@ public final class DictationController: @unchecked Sendable {
     public func whenIdle(_ label: String, _ work: @escaping () -> Void) {
         switch phase {
         case .idle, .starting, .needsModel:
+            guard !recovering else {
+                ports.log("\(label) once the dictation being recovered is done.")
+                pendingIdleAction = (label, work)
+                return
+            }
             cancelReadiness?.set()
             phase = .stopping
             publish()
@@ -665,7 +772,7 @@ public final class DictationController: @unchecked Sendable {
 
     private func runPendingIdleWork() {
         guard phase == .idle else { return }
-        if let action = pendingIdleAction {
+        if let action = pendingIdleAction, !recovering {
             pendingIdleAction = nil
             phase = .stopping
             publish()

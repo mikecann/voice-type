@@ -251,12 +251,16 @@ public final class CaptureBuffer: @unchecked Sendable {
 
     /// Returns true for the first block of a recording.
     @discardableResult
-    public func append(_ block: [Float]) -> Bool {
+    public func append(_ block: [Float]) -> Bool { take(block).first }
+
+    /// Whether the block belongs to a recording (it doesn't between recordings), and whether
+    /// it's the recording's first.
+    public func take(_ block: [Float]) -> (kept: Bool, first: Bool) {
         lock.withLock {
-            guard recording, !block.isEmpty else { return false }
+            guard recording, !block.isEmpty else { return (false, false) }
             let first = samples.isEmpty
             samples.append(contentsOf: block)
-            return first
+            return (true, first)
         }
     }
 
@@ -309,6 +313,9 @@ public final class Recorder: @unchecked Sendable {
     private var restartNeeded = false
     /// Called on the audio thread with the first block of each recording.
     public var onFirstAudio: (@Sendable () -> Void)?
+    /// Called on the audio thread with every block a recording keeps, in order. Set once,
+    /// before the first stream opens, like onFirstAudio. The recording spool uses it.
+    public var onRecordedAudio: (@Sendable ([Float]) -> Void)?
 
     public init(catalog: AudioDeviceCatalog, factory: AudioStreamFactory, log: @escaping @Sendable (String) -> Void,
                 bounded: @escaping (Double, @escaping @Sendable () -> Void) -> Bool = { BoundedRunner.run(timeout: $0, name: "voice-type-audio-stop", $1) }) {
@@ -427,8 +434,10 @@ public final class Recorder: @unchecked Sendable {
         if case .named = current { source = "selected" } else { source = "system default" }
         log("Mic (\(source)): '\(device.name)'")
         let stream = try factory.open(device, onAudio: { [weak self] block in
-            guard let self, self.capture.append(block) else { return }
-            self.onFirstAudio?()
+            guard let self else { return }
+            let taken = self.capture.take(block)
+            if taken.kept { self.onRecordedAudio?(block) }
+            if taken.first { self.onFirstAudio?() }
         }, onError: { [weak self] message in
             self?.log("Audio problem: \(message)")
             // Open a fresh stream on the next key press.
