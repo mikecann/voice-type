@@ -638,96 +638,75 @@ struct HotkeyStateTests {
     }
 }
 
-// Ported from tests/test_preview_format.py.
+// Ported from tests/test_preview_format.py. The two-line wrap went when the pill started
+// fitting the words to its own width.
 struct PreviewFormatTests {
-    @Test func keepsShortTextUnchanged() { #expect(PreviewFormat.wrap("hello there") == "hello there") }
-
-    @Test func wrapsToTwoLines() {
-        #expect(PreviewFormat.wrap("one two three four five six seven eight", maxChars: 20) == "one two three four\nfive six seven eight")
-    }
-
-    @Test func keepsTheLastTwoLinesWithALeadingEllipsis() {
-        #expect(PreviewFormat.wrap("one two three four five six seven eight nine ten", maxChars: 20) == "\u{2026}five six seven eight\nnine ten")
-    }
-
     @Test func previewTextJoinsLikeThePythonLoop() {
         let t = Transcript(segments: [" A. ", "", " B "].map { TranscriptSegment(text: $0, startSec: 0, endSec: 0, noSpeechProb: 0, tokenProbs: []) })
         #expect(PreviewFormat.previewText(t) == "A.  B")
     }
 }
 
-// Ported from tests/test_overlay_feedback.py.
+// Started as tests/test_overlay_feedback.py; the timings changed with the capsule pill.
 struct PillTests {
     final class Surface: PillSurface {
         var presented: [PillAppearance] = []
         var hidden = 0
-        var alpha = 1.0
-        var progress: Double??
-        func present(_ appearance: PillAppearance, repositionOnly: Bool) { presented.append(appearance) }
+        var bars: (heights: [Double], opacities: [Double], level: Double)?
+        func present(_ appearance: PillAppearance) { presented.append(appearance) }
         func hide() { hidden += 1 }
-        func setAlpha(_ alpha: Double) { self.alpha = alpha }
-        func setBarHeights(_ heights: [Double], color: PillColor) {}
-        func setCheckProgress(_ progress: Double?) { self.progress = .some(progress) }
+        func setBars(heights: [Double], opacities: [Double], level: Double) { bars = (heights, opacities, level) }
     }
 
-    func make(reduceMotion: Bool = false) -> (PillController, Surface, ManualExecutor) {
+    func make() -> (PillController, Surface, ManualExecutor) {
         let surface = Surface()
         let clock = ManualExecutor()
-        return (PillController(surface: surface, scheduler: clock, now: { clock.now }, reduceMotion: { reduceMotion }), surface, clock)
+        return (PillController(surface: surface, scheduler: clock), surface, clock)
     }
 
-    @Test func successHoldsThenFadesAndHides() {
+    @Test func aPasteShowsTheTextBesideTheTickThenJustTheTickThenLeaves() {
         let (pill, surface, clock) = make()
-        pill.showDone(words: 1)
-        #expect(surface.presented.last == PillAppearance(state: .done, text: "1 word"))
-        #expect(surface.presented.last?.label == " 1 word")
-        #expect(surface.presented.last?.color == .green)
-        clock.advance(0.21)
-        #expect(pill.isVisible)
-        // The hold ends at 0.22 s and the first fade frame comes 16 ms later.
-        clock.advance(0.03)
-        #expect(pill.isVisible && surface.alpha < 1)
-        clock.advance(0.2)
-        #expect(!pill.isVisible)
-    }
-
-    @Test func aNewRecordingCancelsTheHoldAndRestoresOpacity() {
-        let (pill, surface, clock) = make()
-        pill.showDone(words: 42)
+        pill.showDone(text: "Move it to Thursday.")
+        #expect(surface.presented.last == PillAppearance(state: .done, text: "Move it to Thursday."))
+        #expect(surface.presented.last?.mark == .tick)
+        #expect(surface.presented.last?.showsBars == false)
+        clock.advance(0.79)
+        #expect(surface.presented.last?.text == "Move it to Thursday.")
+        clock.advance(0.02)
+        #expect(surface.presented.last == PillAppearance(state: .done, text: ""))
+        #expect(pill.isVisible && surface.hidden == 0)
         clock.advance(0.3)
-        pill.showRecording()
-        clock.advance(1)
-        #expect(pill.state == .rec && pill.isVisible)
-        #expect(surface.alpha == 1)
-        #expect(surface.presented.last?.label == " REC")
+        #expect(!pill.isVisible && surface.hidden == 1)
     }
 
-    @Test func reducedMotionHidesAfterTheHoldWithoutAFade() {
-        let (pill, surface, clock) = make(reduceMotion: true)
-        pill.showDone(words: 2)
-        #expect(surface.progress == .some(1))
-        clock.advance(0.22)
-        #expect(!pill.isVisible)
+    @Test func aNewRecordingCancelsTheTick() {
+        let (pill, surface, clock) = make()
+        pill.showDone(text: "Hi.")
+        clock.advance(0.5)
+        pill.showRecording()
+        clock.advance(2)
+        #expect(pill.state == .rec && pill.isVisible)
+        #expect(surface.hidden == 0)
+        #expect(surface.presented.last == PillAppearance(state: .rec, text: ""))
     }
 
     @Test func failureHasALongerHoldAndTheClipboardHint() {
         let (pill, surface, clock) = make()
         pill.showPasteFailed()
-        #expect(surface.presented.last?.label == " Clipboard")
-        #expect(surface.presented.last?.preview == "On your clipboard. \u{2318}V to paste")
-        #expect(surface.presented.last?.wideLabel == true)
+        #expect(surface.presented.last?.text == "On your clipboard. \u{2318}V to paste")
+        #expect(surface.presented.last?.mark == .orange)
+        #expect(surface.presented.last?.wraps == true)
         clock.advance(1.59)
         #expect(pill.isVisible)
         clock.advance(0.02)
-        #expect(!pill.isVisible)
+        #expect(!pill.isVisible && surface.hidden == 1)
     }
 
     @Test func aFocusMissSaysWhatHadFocusAndHoldsLongEnoughToRead() {
         let (pill, surface, clock) = make()
         pill.showPasteFailed(FocusMiss(app: "T3 Code", role: "AXButton"))
-        #expect(surface.presented.last?.label == " Clipboard")
-        #expect(surface.presented.last?.preview == "Focus was on a button. Click the text box, then \u{2318}V")
-        #expect(surface.presented.last?.color == .orange)
+        #expect(surface.presented.last?.text == "Focus was on a button. Click the text box, then \u{2318}V")
+        #expect(surface.presented.last?.mark == .orange)
         clock.advance(2.9)
         #expect(pill.isVisible)
         clock.advance(0.2)
@@ -737,32 +716,45 @@ struct PillTests {
     @Test func theClipboardNoticeHoldsLongerAndSaysHowToFixIt() {
         let (pill, surface, clock) = make()
         pill.showClipboardNotKept()
-        #expect(surface.presented.last?.label == " Pasted")
-        #expect(surface.presented.last?.preview == "Allow Paste from other apps to keep your clipboard")
-        #expect(surface.presented.last?.color == .orange)
+        #expect(surface.presented.last?.text == "Allow Paste from other apps to keep your clipboard")
+        #expect(surface.presented.last?.mark == .orange)
         clock.advance(3.9)
         #expect(pill.isVisible)
         clock.advance(0.2)
         #expect(!pill.isVisible)
     }
 
-    @Test func wordCountsArePlural() {
-        #expect(PillAppearance(state: .done, text: "3 words").label == " 3 words")
+    @Test func recordingAndTranscribingShowTheBarsAndOnlyTranscribingShimmers() {
+        let rec = PillAppearance(state: .rec, text: "x")
+        #expect(rec.mark == .red && rec.showsBars && !rec.shimmers && !rec.wraps)
+        let processing = PillAppearance(state: .processing, text: "x")
+        #expect(processing.mark == .grey && processing.showsBars && processing.shimmers)
+        #expect(processing.text == "x")
+    }
+
+    @Test func barsFollowTheVoiceThenRippleWhileWhisperRuns() {
         let (pill, surface, _) = make()
-        pill.showDone(words: 3)
-        #expect(surface.presented.last?.label == " 3 words")
+        pill.showRecording()
+        for frame in 0..<30 { pill.animationFrame(level: 0.07, time: Double(frame) / 60) }
+        let loud = surface.bars!
+        #expect(abs(loud.level - 0.98) < 1e-9)
+        #expect(loud.opacities.allSatisfy { $0 == 1 })
+        // Tallest in the middle.
+        #expect(loud.heights[4] > loud.heights[0] && loud.heights[4] > loud.heights[8])
+        #expect(loud.heights.allSatisfy { $0 <= PillController.barMaxHeight })
+
+        pill.showProcessing("x")
+        for frame in 0..<60 { pill.animationFrame(level: 0.07, time: 1 + Double(frame) / 60) }
+        let settled = surface.bars!
+        #expect(settled.level == 0)
+        #expect(settled.heights.allSatisfy { abs($0 - PillController.barMinHeight) < 0.1 })
+        #expect(Set(settled.opacities.map { ($0 * 100).rounded() }).count > 1)
     }
 
-    @Test func recordingKeepsItsNarrowLabel() {
-        #expect(!PillAppearance(state: .rec, text: "").wideLabel)
-        #expect(PillAppearance(state: .processing, text: "x").label == " ...")
-        #expect(PillAppearance(state: .processing, text: "x").preview == "x")
-    }
-
-    @Test func drawsTheShortStrokeBeforeTheLongOneAndClamps() {
-        #expect(PillController.checkmarkPoints(-1) == [12, 12, 12, 12, 12, 12])
-        #expect(PillController.checkmarkPoints(1.0 / 3) == [12, 12, 20, 20, 20, 20])
-        #expect(PillController.checkmarkPoints(2) == [12, 12, 20, 20, 36, 4])
+    @Test func hidingAPillThatIsntUpDoesNothing() {
+        let (pill, surface, _) = make()
+        pill.hide()
+        #expect(surface.hidden == 0)
     }
 }
 

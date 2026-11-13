@@ -24,6 +24,8 @@ let usage = """
       launch-agent-plist EXE  print the LaunchAgent for an installed app (build script)
       snapshot-windows DIR    save PNGs of the settings and history windows (shown behind
                               every other window for a moment, without taking focus)
+      pill-demo [LOOPS]       play a scripted dictation in the pill LOOPS times (default
+                              1), for recording a clip of it; nothing is typed
 
     options:
       --raw                   run only Whisper: no gates, loop guard or corrections

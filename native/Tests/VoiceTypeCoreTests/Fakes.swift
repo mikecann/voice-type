@@ -218,7 +218,7 @@ final class FakePill: PillPresenting, @unchecked Sendable {
 
     func showRecording(_ preview: String) { calls.append("rec:\(preview)") }
     func showProcessing(_ preview: String) { calls.append("processing:\(preview)") }
-    func showDone(words: Int) { calls.append("done:\(words)") }
+    func showDone(text: String) { calls.append("done:\(text)") }
     func showPasteFailed(_ miss: FocusMiss?) { calls.append(miss.map { "paste_failed:\($0.role)" } ?? "paste_failed") }
     func showClipboardNotKept() { calls.append("clipboard_not_kept") }
     func showRecovered(count: Int, seconds: Double) { calls.append("recovered:\(count)") }

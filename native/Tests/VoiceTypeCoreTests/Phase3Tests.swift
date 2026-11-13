@@ -382,16 +382,15 @@ struct SettingsEditTests {
 struct RecoveredPillTests {
     @Test func saysWhereTheRecoveredDictationWent() {
         let one = PillAppearance(state: .recovered, text: "A 68 s dictation is in History")
-        #expect(one.label == " Recovered")
-        #expect(one.color == .green)
-        #expect(one.wideLabel)
+        #expect(one.mark == .green)
+        #expect(one.wraps)
         let surface = PillTests.Surface()
         let clock = ManualExecutor()
-        let pill = PillController(surface: surface, scheduler: clock, now: { clock.now }, reduceMotion: { false })
+        let pill = PillController(surface: surface, scheduler: clock)
         pill.showRecovered(count: 1, seconds: 67.6)
-        #expect(surface.presented.last?.preview == "A 68 s dictation is in History")
+        #expect(surface.presented.last?.text == "A 68 s dictation is in History")
         pill.showRecovered(count: 2, seconds: 90)
-        #expect(surface.presented.last?.preview == "2 dictations are in History")
+        #expect(surface.presented.last?.text == "2 dictations are in History")
     }
 }
 
@@ -425,25 +424,25 @@ struct CapCountdownTests {
         #expect(!h.pill.calls.suffix(2).contains { $0.hasPrefix("left:") })
     }
 
-    @Test func theLabelSaysTheSecondsLeftUntilTheNextRecording() {
+    @Test func thePillShowsTheSecondsLeftUntilTheNextRecording() {
         let surface = PillTests.Surface()
         let clock = ManualExecutor()
-        let pill = PillController(surface: surface, scheduler: clock, now: { clock.now }, reduceMotion: { false })
+        let pill = PillController(surface: surface, scheduler: clock)
         pill.showRecording("hello")
         pill.showSecondsLeft(9)
-        #expect(surface.presented.last?.label == " 9s")
-        #expect(surface.presented.last?.preview == "hello")
+        #expect(surface.presented.last?.secondsLeft == 9)
+        #expect(surface.presented.last?.text == "hello")
         // A preview update keeps the count.
         pill.showRecording("hello there")
-        #expect(surface.presented.last?.label == " 9s")
+        #expect(surface.presented.last?.secondsLeft == 9)
         pill.showProcessing("hello there")
         pill.hide()
         pill.showRecording("")
-        #expect(surface.presented.last?.label == " REC")
+        #expect(surface.presented.last?.secondsLeft == nil)
         // Not while it isn't recording.
         pill.showProcessing("")
         pill.showSecondsLeft(3)
-        #expect(surface.presented.last?.label == " ...")
+        #expect(surface.presented.last == PillAppearance(state: .processing, text: ""))
     }
 }
 

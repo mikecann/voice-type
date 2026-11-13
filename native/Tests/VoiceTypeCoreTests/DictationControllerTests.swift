@@ -91,7 +91,7 @@ struct DictationControllerDictationTests {
         #expect(historyBeforePaste)
         #expect(h.paster.pasted.map(\.text) == ["Port it to CUDA."])
         #expect(h.paster.pasted.first?.target == TargetApp(pid: 42, name: "T3 Code"))
-        #expect(h.pill.calls.suffix(2) == ["processing:", "done:4"])
+        #expect(h.pill.calls.suffix(2) == ["processing:", "done:Port it to CUDA."])
         #expect(h.transcriber.finalBegun == 1 && h.transcriber.finalEnded == 1)
         // The engine got exactly what the microphone delivered.
         #expect(h.engine.finals.first?.count == Int(1.4 * 16000))
@@ -281,7 +281,7 @@ struct DictationControllerDictationTests {
         h.dictate(ControllerHarness.speech(seconds: 1))
         #expect(h.pill.last == "clipboard_not_kept")
         h.dictate(ControllerHarness.speech(seconds: 1))
-        #expect(h.pill.last == "done:4")
+        #expect(h.pill.last == "done:Port it to CUDA.")
         #expect(h.logs.filter { $0.hasPrefix("Clipboard access is denied") }.count == 1)
     }
 
@@ -335,13 +335,13 @@ struct DictationControllerPreviewTests {
         #expect(h.transcriber.previewRequests.count == 1)
         h.transcriber.releasePreview("one two three four five six seven eight nine ten eleven")
         h.executor.drain()
-        #expect(h.pill.last == "rec:one two three four five six\nseven eight nine ten eleven")
+        #expect(h.pill.last == "rec:one two three four five six seven eight nine ten eleven")
         h.executor.advance(0.5)
         #expect(h.transcriber.previewRequests.count == 1)
         h.release()
         #expect(h.transcriber.finalBegun == 1)
         // The final pass shows the last preview while it runs.
-        #expect(h.pill.calls.contains("processing:one two three four five six\nseven eight nine ten eleven"))
+        #expect(h.pill.calls.contains("processing:one two three four five six seven eight nine ten eleven"))
         // A preview that comes back after key-up is ignored.
         h.transcriber.releasePreview("late")
         h.executor.drain()

@@ -19,7 +19,8 @@ public protocol PillPresenting: AnyObject, Sendable {
     /// The last seconds before the 120 s cap.
     func showSecondsLeft(_ seconds: Int)
     func showProcessing(_ preview: String)
-    func showDone(words: Int)
+    /// The paste landed; `text` is what was typed.
+    func showDone(text: String)
     /// The paste didn't land. With `miss`, focus wasn't on a text box, and the pill says so.
     func showPasteFailed(_ miss: FocusMiss?)
     /// The paste landed, but the old clipboard couldn't be read, so it wasn't put back.
@@ -54,7 +55,7 @@ public struct FinaliseJob: Sendable {
     public var samples: [Float]
     /// The recording's JSON fields, in Python's order, plus native's.
     public var metadata: [(key: String, value: JSONValue)]
-    /// The last live preview, already wrapped, shown while the final pass runs.
+    /// The last live preview, shown while the final pass runs.
     public var preview: String
     public var target: TargetApp?
     public var settings: SettingsFile
@@ -267,7 +268,7 @@ public final class Finaliser: @unchecked Sendable {
             log("Clipboard access is denied for Voice Type Native, so the dictated text replaces whatever was on the clipboard. Allow it under System Settings > Privacy & Security > Paste from Other Apps (the Permissions window has a button).")
             pill.showClipboardNotKept()
         } else if pasted.landed {
-            pill.showDone(words: outcome.words)
+            pill.showDone(text: text)
         } else {
             // The text was left on the clipboard and Funk played.
             pill.showPasteFailed(pasted.focusMiss)

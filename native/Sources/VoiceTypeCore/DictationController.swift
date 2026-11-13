@@ -515,7 +515,7 @@ public final class DictationController: @unchecked Sendable {
                 lastPreview = ""
             } else {
                 lastPreview = text
-                ports.pill.showRecording(PreviewFormat.wrap(text))
+                ports.pill.showRecording(text)
             }
         }
         schedulePreview(gen)
@@ -569,7 +569,7 @@ public final class DictationController: @unchecked Sendable {
             ports.restartProcess(String(format: "Final transcription exceeded %.1fs; restarting with a fresh native backend (automatic retry is disabled to avoid duplicate injection)", timeout))
         }
         finalWatchdog = watchdog
-        var job = FinaliseJob(samples: samples, metadata: metadata, preview: PreviewFormat.wrap(lastPreview), target: active.target,
+        var job = FinaliseJob(samples: samples, metadata: metadata, preview: lastPreview, target: active.target,
                               settings: s, keyUpAt: keyUpAt, stopAudioSeconds: stopTook, keyHoldSeconds: keyHold)
         if let spooled = active.spooled, let spool = ports.spool {
             job.discardSpooled = { spool.discardNow(spooled) }

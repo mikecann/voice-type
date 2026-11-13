@@ -74,29 +74,6 @@ public struct HotkeyState: Sendable {
 }
 
 public enum PreviewFormat {
-    public static let maxChars = 32
-
-    /// Word-wraps the live preview to its last two lines, with a leading ellipsis when
-    /// earlier lines were cut. Ported from preview_format.py.
-    public static func wrap(_ text: String, maxChars: Int = maxChars) -> String {
-        guard !text.isEmpty else { return "" }
-        var lines: [String] = []
-        var current = ""
-        // len() in Python counts code points.
-        for word in PythonText.split(text) {
-            if !current.isEmpty && current.unicodeScalars.count + 1 + word.unicodeScalars.count > maxChars {
-                lines.append(current)
-                current = word
-            } else {
-                current = current.isEmpty ? word : current + " " + word
-            }
-        }
-        if !current.isEmpty { lines.append(current) }
-        guard !lines.isEmpty else { return "" }
-        let prefix = lines.count > 2 ? "\u{2026}" : ""
-        return prefix + lines.suffix(2).joined(separator: "\n")
-    }
-
     /// How the Python preview loop joins segments: each stripped, joined with spaces, then
     /// stripped again. Unlike the final text it keeps empty segments' spaces, and it skips the
     /// loop guard and corrections.

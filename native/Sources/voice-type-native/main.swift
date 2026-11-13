@@ -35,6 +35,7 @@ case "launch-agent-plist": service.launchAgentPlist()
 case "snapshot-windows":
     guard let dir = options.positional.first else { fail("snapshot-windows needs a folder to write the PNGs to") }
     do { try WindowSnapshots.render(to: URL(fileURLWithPath: dir)) } catch { fail(error.localizedDescription, code: 1) }
+case "pill-demo": PillDemo.run(loops: options.positional.first.flatMap(Int.init) ?? 1)
 case "":
     print(usage)
     exit(2)
