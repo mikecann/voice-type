@@ -136,8 +136,6 @@ final class FakeProbe: MicrophoneProbing, @unchecked Sendable {
 
 final class ScriptedEngine: DictationEngine, @unchecked Sendable {
     var segments: [String]
-    /// Word timings for the first segment, given only when they're asked for.
-    var timedWords: [TimedText] = []
     private(set) var finalOptions: [TranscribeOptions] = []
     var fail = false
     /// Runs inside every final transcription, to look at the world mid-pass.
@@ -159,9 +157,8 @@ final class ScriptedEngine: DictationEngine, @unchecked Sendable {
             duringTranscribe()
         }
         if fail { throw MicrophoneUnavailable("whisper failed") }
-        return Transcript(segments: segments.enumerated().map { i, text in
-            TranscriptSegment(text: text, startSec: 0, endSec: 1, noSpeechProb: 0.01, tokenProbs: [0.9, 0.8],
-                              words: options.wordTimings && i == 0 ? timedWords : [])
+        return Transcript(segments: segments.map { text in
+            TranscriptSegment(text: text, startSec: 0, endSec: 1, noSpeechProb: 0.01, tokenProbs: [0.9, 0.8])
         })
     }
 
@@ -213,29 +210,6 @@ final class FakeTranscriber: Transcribing, @unchecked Sendable {
 
     func beginFinal() { finalBegun += 1 }
     func endFinal() { finalEnded += 1 }
-
-    /// What the timing pass returns; nil means there's no timing engine.
-    var timingTranscript: Transcript?
-    /// The timing pass never finishes, like one stuck in Metal: its wait runs out.
-    var timingHangs = false
-    private(set) var timingPrepared = 0
-    private(set) var timingPasses = 0
-    private(set) var timingTimeouts: [Double] = []
-    private(set) var timingPromptTokens: [[Int32]] = []
-    private(set) var timingDrops: [String] = []
-    private(set) var lastTimingPass: WordTimingPass?
-    func prepareWordTimings() { timingPrepared += 1 }
-    func startWordTimings(_ samples: [Float], promptTokens: [Int32], timeout: Double) -> WordTimingPass {
-        timingPasses += 1
-        timingTimeouts.append(timeout)
-        timingPromptTokens.append(promptTokens)
-        // A real (short) deadline for a hung pass, so the finaliser really waits it out.
-        let pass = timingHangs ? WordTimingPass(timeout: 0.05) : .finished(timingTranscript)
-        lastTimingPass = pass
-        return pass
-    }
-    func dropWordTimings(reason: String) { timingDrops.append(reason) }
-    var wordTimingsLoaded = true
 }
 
 final class FakePill: PillPresenting, @unchecked Sendable {
@@ -245,9 +219,7 @@ final class FakePill: PillPresenting, @unchecked Sendable {
     func showRecording(_ preview: String) { calls.append("rec:\(preview)") }
     func showProcessing(_ preview: String) { calls.append("processing:\(preview)") }
     func showDone(words: Int) { calls.append("done:\(words)") }
-    func showDone(words: Int, shots: Int) { calls.append("done:\(words)+\(shots)") }
     func showPasteFailed(_ miss: FocusMiss?) { calls.append(miss.map { "paste_failed:\($0.role)" } ?? "paste_failed") }
-    func showScreenRecordingHint() { calls.append("hint") }
     func showClipboardNotKept() { calls.append("clipboard_not_kept") }
     func showRecovered(count: Int, seconds: Double) { calls.append("recovered:\(count)") }
     func showSecondsLeft(_ seconds: Int) { calls.append("left:\(seconds)") }
@@ -262,7 +234,6 @@ final class FakePaster: Pasting, @unchecked Sendable {
     var focusMiss: FocusMiss?
     var duringPaste: () -> Void = {}
     private(set) var pasted: [(text: String, target: TargetApp?)] = []
-    private(set) var sequences: [(text: String, images: [Data])] = []
 
     func paste(_ text: String, into target: TargetApp?) throws -> PasteOutcome {
         duringPaste()
@@ -270,15 +241,6 @@ final class FakePaster: Pasting, @unchecked Sendable {
         pasted.append((text, target))
         return PasteOutcome(landed: landed, readLatency: landed ? 0.01 : nil, focusRole: "AXTextArea", refocused: false, clipboard: clipboard,
                             focusMiss: landed ? nil : focusMiss)
-    }
-
-    func pasteSequence(text: String, images: [Data], into target: TargetApp?) throws -> Paster.SequenceOutcome {
-        duringPaste()
-        if throwError { throw PasteError() }
-        sequences.append((text, images))
-        let total = (PythonText.strip(text).isEmpty ? 0 : 1) + images.count
-        return Paster.SequenceOutcome(pasted: landed ? total : 0, total: total, landed: landed, focusRole: "AXTextArea", refocused: false, clipboard: clipboard,
-                                      focusMiss: landed ? nil : focusMiss)
     }
 }
 
@@ -306,17 +268,15 @@ final class ControllerHarness: @unchecked Sendable {
     var recorder: Recorder!
     var controller: DictationController!
 
-    let marks: MarkSessions?
     private(set) var spool: RecordingSpool?
     private(set) var recovery: DictationRecovery?
     private(set) var recovered: [RecoveredDictation] = []
 
     init(devices: [InputDevice] = [InputDevice(id: 1, name: "MacBook Pro Microphone"), InputDevice(id: 2, name: "Yeti Stereo Microphone")],
          settings: JSONValue = .object([("audio_recording_enabled", .bool(true)), ("vocabulary", .strings(["Convex"]))]),
-         readinessLane: ManualExecutor? = nil, finaliseLane: ManualExecutor? = nil, marks: MarkSessions? = nil,
+         readinessLane: ManualExecutor? = nil, finaliseLane: ManualExecutor? = nil,
          spool: Bool = false, recovery: Bool = false,
          beforeStart: (URL) throws -> Void = { _ in }) throws {
-        self.marks = marks
         catalog = FakeCatalog(devices, default: devices.first)
         probe = FakeProbe(catalog: catalog)
         transcriber = FakeTranscriber(engine)
@@ -352,7 +312,7 @@ final class ControllerHarness: @unchecked Sendable {
                 // Never fires by itself; tests fire it through `watchdogs`.
                 return OperationWatchdog(name: name, timeout: 86_400 * 365, onTimeout: {})
             },
-            marks: marks, spool: self.spool, recovery: self.recovery,
+            spool: self.spool, recovery: self.recovery,
             recovered: { [unowned self] in self.recovered.append(contentsOf: $0) }
         )
         controller = DictationController(ports: ports)

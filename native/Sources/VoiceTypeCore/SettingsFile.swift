@@ -39,9 +39,6 @@ public struct SettingsFile: Sendable {
     /// Off unless set, as in Python's setdefault.
     public var audioRecordingEnabled: Bool { json["audio_recording_enabled"]?.isTruthy ?? false }
 
-    /// Drawing on screen while the key is held. On unless set.
-    public var drawOnScreenEnabled: Bool { json["draw_on_screen_enabled"]?.isTruthy ?? true }
-
     /// The vocabulary as Python's `list(_settings.get("vocabulary", []))` would store it in a
     /// recording: the list itself when it's a list of strings.
     public var vocabularyForRecording: JSONValue {
@@ -53,16 +50,6 @@ public struct SettingsFile: Sendable {
     }
 
     public func native(_ key: String) -> JSONValue? { json[Self.nativeKey]?[key] }
-
-    /// How screen marks' "[n]" markers are timed: `"native": {"marker_timings": "rough"}`
-    /// uses the final pass's own token timestamps and never loads the second, 1 GB timing
-    /// context; anything else means "accurate", the DTW timing pass.
-    public enum MarkerTimings: String, Sendable { case accurate, rough }
-
-    public var markerTimings: MarkerTimings {
-        guard let value = native("marker_timings")?.stringValue else { return .accurate }
-        return MarkerTimings(rawValue: PythonText.strip(value).lowercased()) ?? .accurate
-    }
 
     // MARK: The settings window's edits
 

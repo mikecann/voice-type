@@ -289,7 +289,6 @@ struct SettingsFileTests {
         let settings = SettingsFile(url: URL(fileURLWithPath: "/nonexistent"), json: .object([]))
         #expect(settings.microphoneName == "Yeti Stereo Microphone")
         #expect(!settings.audioRecordingEnabled)
-        #expect(settings.drawOnScreenEnabled)
         #expect(settings.vocabularyForRecording == .strings(VoiceTypeSettings.defaultVocabulary))
     }
 }

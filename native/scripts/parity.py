@@ -2,7 +2,7 @@
 """Run voice-type-native over the benchmark's labelled clips and compare with whisper.cpp.
 
 Usage (standard library only):
-    python3 native/scripts/parity.py BENCHMARK_DIR OUT_DIR [--model PATH] [--raw] [--word-timings]
+    python3 native/scripts/parity.py BENCHMARK_DIR OUT_DIR [--model PATH] [--raw]
 
 Talks to `voice-type-native serve` the way the benchmark talks to whispercpp-bench, without
 prompt_tokens, so the word list is read from settings.json and tokenized natively. Two sets:
@@ -13,9 +13,6 @@ prompt_tokens, so the word list is read from settings.json and tokenized nativel
 
 Writes OUT_DIR/{real,review}-{raw,pipeline}.json (clip id -> text) and a .meta.json beside
 each with status, levels and timings. Reads the benchmark folder, never writes to it.
-
---word-timings times every word, as the app does for dictations with screen marks, to show
-that it doesn't change the text. Its files end in -timed.json.
 """
 
 import json
@@ -42,8 +39,7 @@ def main():
     args = sys.argv[1:]
     bench, out = Path(args[0]), Path(args[1])
     raw = "--raw" in args
-    timed = "--word-timings" in args
-    cmd = [str(BINARY), "serve"] + (["--raw"] if raw else []) + (["--word-timings"] if timed else [])
+    cmd = [str(BINARY), "serve"] + (["--raw"] if raw else [])
     if "--model" in args:
         cmd += ["--model", args[args.index("--model") + 1]]
     out.mkdir(parents=True, exist_ok=True)
@@ -61,7 +57,7 @@ def main():
     first = clips(bench, "real")[0][1]
     ask({"id": "warm-up", "path": str(first)})
 
-    mode = ("raw" if raw else "pipeline") + ("-timed" if timed else "")
+    mode = "raw" if raw else "pipeline"
     for name in ("real", "review"):
         texts, meta, same, different, times = {}, {}, 0, [], []
         for clip_id, wav, reference in clips(bench, name):

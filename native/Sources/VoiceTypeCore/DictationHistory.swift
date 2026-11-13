@@ -24,8 +24,6 @@ public struct HistoryItem: Identifiable, Equatable, Sendable {
     public var outcome: Outcome
     public var durationSec: Double?
     public var audioURL: URL?
-    /// The screenshots that were pasted with it, if they're still on disk (7 days).
-    public var screenshots: [URL]
     /// What Mike says it should have been ("Fix it").
     public var correctedText: String?
     /// History's "Transcribe again".
@@ -42,8 +40,8 @@ public struct HistoryItem: Identifiable, Equatable, Sendable {
 /// reads: it never rewrites the history file, which the finaliser appends to.
 public enum DictationHistory {
     /// A history line and a recording are the same dictation when the text matches and the
-    /// line was written within this long of the recording (the final pass, markers and the
-    /// screenshots all come between).
+    /// line was written within this long of the recording (the final pass and the paste
+    /// come between).
     static let matchWindowSeconds = 180.0
 
     public static func load(recordings: URL, historyFile: URL, fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> [HistoryItem] {
@@ -61,7 +59,7 @@ public enum DictationHistory {
                 continue
             }
             items.append(HistoryItem(id: "history:\(line.createdAt)", recordingID: nil, date: line.date, text: line.text, outcome: .typed,
-                                     durationSec: nil, audioURL: nil, screenshots: [], correctedText: nil, retranscribedText: nil,
+                                     durationSec: nil, audioURL: nil, correctedText: nil, retranscribedText: nil,
                                      recovered: false))
         }
         return items.sorted { $0.date > $1.date }
@@ -90,12 +88,10 @@ public enum DictationHistory {
         default: outcome = .failed
         }
         let audio = (meta["audio_file"] as? String).map { directory.appendingPathComponent($0) }
-        let shots = (meta["screenshots"] as? [String] ?? []).filter(fileExists).map { URL(fileURLWithPath: $0) }
         return HistoryItem(
             id: id, recordingID: id, date: parsed.timestamp(assumingOffset: 0).date, text: text, outcome: outcome,
             durationSec: meta["duration_seconds"] as? Double,
             audioURL: audio.flatMap { fileExists($0.path) ? $0 : nil },
-            screenshots: shots,
             correctedText: meta["corrected_text"] as? String,
             retranscribedText: meta["retranscribed_text"] as? String,
             recovered: meta["recovered"] as? Bool ?? false

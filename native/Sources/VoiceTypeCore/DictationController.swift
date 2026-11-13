@@ -64,8 +64,6 @@ public final class DictationController: @unchecked Sendable {
         public var finaliseLane: Executor
         public var readinessLane: Executor
         public var makeWatchdog: (String, Double, @escaping @Sendable () -> Void) -> OperationWatchdog
-        /// Drawing while dictating; nil without a mouse tap (or in tests that don't draw).
-        public var marks: MarkSessions?
         /// Writes the audio to disk while the key is held, so a crash can't lose it.
         public var spool: RecordingSpool?
         /// Finishes dictations an earlier run left behind, once the model is loaded.
@@ -80,7 +78,7 @@ public final class DictationController: @unchecked Sendable {
                     now: @escaping () -> Double, wallClock: @escaping () -> Date, queue: Executor & Scheduler,
                     finaliseLane: Executor, readinessLane: Executor,
                     makeWatchdog: @escaping (String, Double, @escaping @Sendable () -> Void) -> OperationWatchdog,
-                    marks: MarkSessions? = nil, spool: RecordingSpool? = nil, recovery: DictationRecovery? = nil,
+                    spool: RecordingSpool? = nil, recovery: DictationRecovery? = nil,
                     recovered: @escaping ([RecoveredDictation]) -> Void = { _ in }) {
             self.recorder = recorder
             self.transcriber = transcriber
@@ -99,7 +97,6 @@ public final class DictationController: @unchecked Sendable {
             self.finaliseLane = finaliseLane
             self.readinessLane = readinessLane
             self.makeWatchdog = makeWatchdog
-            self.marks = marks
             self.spool = spool
             self.recovery = recovery
             self.recovered = recovered
@@ -200,7 +197,7 @@ public final class DictationController: @unchecked Sendable {
 
     /// Loads the model and checks the microphone. Dictation starts once both are ready.
     public func start() {
-        ports.log("Settings: microphone_name='\(settings.microphoneName)'  audio_recording_enabled=\(settings.audioRecordingEnabled ? "True" : "False")  draw_on_screen_enabled=\(settings.drawOnScreenEnabled ? "True" : "False")")
+        ports.log("Settings: microphone_name='\(settings.microphoneName)'  audio_recording_enabled=\(settings.audioRecordingEnabled ? "True" : "False")")
         cleanUpRecordings()
         let watchdog = ports.makeWatchdog("model-load", Deadlines.modelLoad) { [ports] in
             ports.restartProcess("Final model load exceeded \(Int(Deadlines.modelLoad))s; restarting with a fresh native backend")
@@ -257,9 +254,6 @@ public final class DictationController: @unchecked Sendable {
         message = MicrophoneReadiness.initialMessage(preferred: preferred)
         if noticeRevealed { ports.pill.showProcessing(message) }
         if reason != "startup" { ports.log("Preparing the microphone again (\(reason)).") }
-        // Only a wake warms up. The main engine's warm-up below proves its Metal context
-        // still works; the word timing one is simply dropped, and the next mark loads it afresh.
-        if warmUp { ports.transcriber.dropWordTimings(reason: reason) }
         // Closing everything means the next stream is opened from a fresh device lookup.
         ports.recorder.close()
         publish()
@@ -410,22 +404,12 @@ public final class DictationController: @unchecked Sendable {
         // Clear any completion feedback; REC appears with the first audio.
         ports.pill.hide()
         generation += 1
-        // Drawing starts before the microphone, not after. Opening a stream that wasn't
-        // prepared can take a few hundred ms, and a click in that time went straight to the
-        // app underneath and could move its focus off the text box the words were for.
-        // Switching the mouse tap on is one quick call, so it doesn't hold the microphone up.
-        // Drawing still never starts for a key-down that can't dictate: every gate (paused,
-        // starting, no model, finalising, drawing off) has passed by now, and the microphone,
-        // the one thing left that can fail, abandons the session below.
-        let marks = settings.drawOnScreenEnabled ? ports.marks : nil
-        marks?.begin(wordTimings: settings.markerTimings == .accurate)
         // Before the microphone, so the spool is there for the very first block. Only when
         // recordings are kept: it's the same audio, written sooner.
         let spooled = settings.audioRecordingEnabled ? ports.spool?.begin() : nil
         let result = ports.recorder.start()
         let ready = ports.now() - downSince
         guard case let .started(reused) = result else {
-            marks?.abandon()
             if let spooled { ports.spool?.discard(spooled) }
             if case let .failed(why) = result {
                 ports.log("Microphone stream could not open: \(why). Voice Type will reconnect the microphone.")
@@ -444,8 +428,6 @@ public final class DictationController: @unchecked Sendable {
             ports.log(String(format: "Slow microphone start: %.0f ms from key-down to recording%@.", ready * 1000,
                              reused ? "" : " (the stream had to be opened first)"))
         }
-        // The first sample was captured about when start() returned.
-        marks?.microphoneStarted(audioOrigin: downSince + ready)
         phase = .recording
         recording = ActiveRecording(generation: generation, downSince: downSince, target: target, captureReadyDelay: ready,
                                     firstAudioDelay: nil, settings: settings, spooled: spooled)
@@ -546,7 +528,6 @@ public final class DictationController: @unchecked Sendable {
         capTimer?.cancel()
         countdownTimer?.cancel()
         previewTimer?.cancel()
-        let marks = ports.marks?.finish()
         ports.log("--- Key UP ---")
         // One line for the dictation's live preview, rather than one every half second, which
         // filled the log now that native no longer restarts (and rotates it) at every wake.
@@ -579,18 +560,17 @@ public final class DictationController: @unchecked Sendable {
             ("formatter_enabled", .bool(false)),
             ("vocabulary", s.vocabularyForRecording),
         ]
-        if let marks { metadata.append(("mark_count", .int(marks.strokes.count))) }
         metadata.append(("app", .string("native")))
         metadata.append(("engine", .string(Finaliser.engineName)))
 
         let duration = Double(samples.count) / Double(sampleRate)
-        let timeout = Deadlines.finalisation(durationSec: duration, marks: marks?.strokes.count ?? 0)
+        let timeout = Deadlines.finalisation(durationSec: duration)
         let watchdog = ports.makeWatchdog("finalization", timeout) { [ports] in
             ports.restartProcess(String(format: "Final transcription exceeded %.1fs; restarting with a fresh native backend (automatic retry is disabled to avoid duplicate injection)", timeout))
         }
         finalWatchdog = watchdog
         var job = FinaliseJob(samples: samples, metadata: metadata, preview: PreviewFormat.wrap(lastPreview), target: active.target,
-                              settings: s, keyUpAt: keyUpAt, stopAudioSeconds: stopTook, keyHoldSeconds: keyHold, marks: marks)
+                              settings: s, keyUpAt: keyUpAt, stopAudioSeconds: stopTook, keyHoldSeconds: keyHold)
         if let spooled = active.spooled, let spool = ports.spool {
             job.discardSpooled = { spool.discardNow(spooled) }
         }
@@ -821,10 +801,6 @@ public final class DictationController: @unchecked Sendable {
         DispatchQueue.global(qos: .utility).async {
             let removed = ports.archive.cleanup()
             if removed > 0 { ports.log("Deleted \(removed) expired recording archive file(s).") }
-            if let marks = ports.marks {
-                let shots = marks.cleanUp()
-                if shots > 0 { ports.log("Deleted \(shots) expired mark screenshot(s).") }
-            }
         }
     }
 

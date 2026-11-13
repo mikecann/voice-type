@@ -1,6 +1,6 @@
 # Voice Type Native
 
-Voice Type as a Swift menu bar app, planned in [PLAN.md](PLAN.md). Phases 1 and 2 are built: dictation, and drawing on screen while you talk. It runs whisper.cpp large-v3-turbo q8_0 on Metal and decodes exactly as the benchmark's whispercpp-bench does. It replaced the original Python version, which was removed after commit 17e8220, and it reads and writes that version's settings, recordings, history and screenshots in the same formats, so nothing was lost in the move.
+Voice Type as a Swift menu bar app, planned in [PLAN.md](PLAN.md). Phases 1 and 3 are built: dictation, then settings, history and crash safety. Phase 2, drawing on screen while you talk, was built and then taken out again on 13 November 2026 (it's in the history up to commit 7e47882). It runs whisper.cpp large-v3-turbo q8_0 on Metal and decodes exactly as the benchmark's whispercpp-bench does. It replaced the original Python version, which was removed after commit 17e8220, and it reads and writes that version's settings, recordings and history in the same formats, so nothing was lost in the move.
 
 ## Building and testing
 
@@ -14,13 +14,13 @@ swift test
 
 The first build downloads ggml-org's whisper.cpp xcframework (release b5454, about 66 MB) into `.build`. Package.swift pins its checksum, so nothing binary lives in git.
 
-`swift test` runs everything that needs no hardware: the ported Python tests, the controller, paste flow, recordings, history, the lock and LaunchAgent rules and watchdogs against fakes, the resampler, and drawing (the ink tracker and mouse tap session, the capture worker, marker placement, the text-and-screenshots paste, and the screenshot compositor against Python's own output). Nothing in it opens the keyboard or mouse tap, the microphone or the pasteboard, takes a screenshot, or calls launchctl. The whisper tests skip themselves unless the model is at the default path below or you point at it:
+`swift test` runs everything that needs no hardware: the ported Python tests, the controller, paste flow, recordings, history, the lock and LaunchAgent rules and watchdogs against fakes, the resampler. Nothing in it opens the keyboard tap, the microphone or the pasteboard, takes a screenshot, or calls launchctl. The whisper tests skip themselves unless the model is at the default path below or you point at it:
 
 ```
 VOICE_TYPE_TEST_MODEL=/path/to/ggml-large-v3-turbo-q8_0.bin swift test
 ```
 
-The files in `Tests/VoiceTypeCoreTests/Fixtures/python` were written by the Python version's own recording_archive.py, transcription_history.py and json.dump, and the tests compare against them byte for byte. `Fixtures/marks` is three synthetic window captures and what the Python version's composite_png (in mark_capture.py) made of them, with and without marks. They were generated from the Python version, which was removed after commit 17e8220. To regenerate them, check out that commit and run its `native/scripts/make-python-fixtures.py` or `native/scripts/make-mark-fixtures.py` (the second needs Pillow).
+The files in `Tests/VoiceTypeCoreTests/Fixtures/python` were written by the Python version's own recording_archive.py, transcription_history.py and json.dump, and the tests compare against them byte for byte. They were generated from the Python version, which was removed after commit 17e8220. To regenerate them, check out that commit and run its `native/scripts/make-python-fixtures.py`.
 
 ## Installing the app
 
@@ -57,9 +57,9 @@ Only one copy dictates. The one launchd starts holds `voice-type.instance.lock` 
 
 ## Settings and history
 
-**Settings** (Settings... in the menu, or open the app from Spotlight) has three tabs. General: dictation on or off, the microphone, whether recordings are kept, drawing on screen and its marker timing, and Open Log, Open Data Folder and Restart. Words: the word list Whisper is given and the corrections applied after it (what it hears on the left, what to type on the right, run in order). Permissions: each grant, with a button to ask for it or open the right page of System Settings. Everything is written to settings.json straight away (edits to the word list half a second after you stop typing) and used from the next key-down. Only what you changed is applied, so a word added to the file by hand while the window is open stays. The ⓘ next to a setting says what it does.
+**Settings** (Settings... in the menu, or open the app from Spotlight) has three tabs. General: dictation on or off, the microphone, whether recordings are kept, and Open Log, Open Data Folder and Restart. Words: the word list Whisper is given and the corrections applied after it (what it hears on the left, what to type on the right, run in order). Permissions: each grant, with a button to ask for it or open the right page of System Settings. Everything is written to settings.json straight away (edits to the word list half a second after you stop typing) and used from the next key-down. Only what you changed is applied, so a word added to the file by hand while the window is open stays. The ⓘ next to a setting says what it does.
 
-**History** (History... in the menu) lists the last 30 days of dictations, newest first, from the recordings and the history file. Click one to copy it, or search. Each has a play button while its audio is kept, thumbnails of any screenshots (7 days), and a menu with:
+**History** (History... in the menu) lists the last 30 days of dictations, newest first, from the recordings and the history file. Click one to copy it, or search. Each has a play button while its audio is kept, and a menu with:
 
 - **Fix It**: type what you actually said. It's saved in the recording as `corrected_text`, and the recording is copied into `labelled/` in the data folder, which is never cleaned up, so the benchmark gets a labelled clip that outlives the 30 days.
 - **Transcribe Again**: runs Whisper on the saved audio without the gates, for a clip that was skipped as too quiet, say, one at a time. The result goes in the recording as `retranscribed_text` and shows in grey; it isn't typed anywhere.
@@ -75,33 +75,13 @@ If Core Audio or Metal hangs (a watchdog fires, a microphone call doesn't return
 
 If F12 just beeps, another app has macOS's Secure Input on, which keeps every key away from Voice Type, so it can't see the press. Usually that's a focused password box, but Terminal and iTerm's Secure Keyboard Entry does it at any prompt too. The menu bar icon turns into a lock and the menu names the app ("Google Chrome is blocking keys"), `voice-type-native status` shows it too, and the log gets a line when it turns on and off. Click out of the password box or close that tab, or turn off Secure Keyboard Entry in the terminal's menu, and F12 works again.
 
-## Drawing while you talk
-
-Hold F12 or Right Control, talk, and click or drag on the screen. A click leaves a ring, a straight drag an arrow, and anything else (a circle, a scribble) stays as you drew it, each with a number. Moving the mouse without a button pressed works as normal, and nothing reaches the app underneath while you draw, from the moment the key goes down, even if the microphone is still opening. When you let go, the text goes in with `[1]`, `[2]` and so on where you were talking when you finished each mark, then a screenshot of each window you drew on, each as its own Cmd+V 0.35 s apart, and the clipboard is put back once at the end. Marks on the same window share one screenshot. If you draw but don't say anything, only the screenshots are pasted. Up to 10 marks per dictation.
-
-- **The mouse.** A second event tap, on the same thread as the keyboard's, watches only left mouse down, drag and up, and is only switched on for the length of a dictation. It stops swallowing the moment the key goes up, on the tap's own thread. A drag already under way when you press the key belongs to the app; if you let go of the key mid-drag the mark ends there and the mouse-up that's owed is swallowed (given up after 5 s if it never comes); a press still owed from the last dictation stays yours in the next; and after a tap timeout, a wake or a keyboard tap timeout Voice Type lets go of the button. A watchdog checks four times a second while the tap is on.
-- **The ink** is drawn live on a click-through panel on each display you draw on, which never takes focus and is left out of screenshots. The panels are closed once the ink has gone, so they don't hold on to their memory between dictations.
-- **Screenshots.** Each mark captures the window under it with `screencapture -x -o -l <window>`, or an 800-point region of the display over bare desktop, on a worker while you're still holding the key. Ink and numbers are drawn with Core Graphics, then the image is shrunk to a 1568 px long edge and saved as a 256-colour PNG, using ports of the same Pillow resize and quantizer Python used, so they come out the same (about 100 to 190 KB for a typical window). They're saved in `screenshots/` under the data folder and deleted after 7 days.
-- **Markers** need each word's time. The text always comes from the normal pass; a dictation with marks then gets a second, timing-only pass in another whisper.cpp context that aligns the words the way mlx-whisper did for Python (DTW over the model's alignment heads, which needs flash attention off, hence the second context). That context is about 1 GB: it's loaded on its own thread once your first mark of a dictation has been captured, usually before you let go, and freed 5 minutes after your last mark (sleep counts) or when the Mac wakes. The pass adds about 0.4 s before the paste on a short dictation. If it can't load, or takes longer than 4 s plus 0.1 s per second of audio, the normal pass's own token timestamps are used, which are rougher, and the words still go in. To skip the timing pass and its memory altogether, set Marker timing to Rough in Settings (it's `"native": {"marker_timings": "rough"}` in settings.json; `"accurate"` is the default); it applies from the next key-down.
-- **Screen Recording.** The first time you draw without it, your words still paste, the pill says "No screenshots" and macOS asks. Switch on Voice Type Native under System Settings > Privacy & Security > Screen & System Audio Recording (or use the button on the Permissions tab in Settings), then run `voice-type-native restart`.
-- Turn it off with Draw on screen in Settings (`draw_on_screen_enabled` in settings.json); native picks it up at the next key-down.
-
-To check the compositor without holding the key:
-
-```
-.build/release/voice-type-native composite capture.png out.png --rect X,Y,W,H --marks marks.json
-```
-
-`--rect` is what the capture covers in screen points and `marks.json` is `[{"number": 1, "points": [[x, y], ...]}]` in the same points.
-
 ## Data
 
 Everything lives in `~/Library/Application Support/Voice Type` (or `$VOICE_TYPE_DATA_DIR`), the folder the Python version used, in the formats it wrote, so older settings, recordings and history carry on.
 
-- `settings.json`: native reads `microphone_name`, `vocabulary`, `corrections`, `audio_recording_enabled` and `draw_on_screen_enabled`, notices when the file changes (so a hand edit works too), and when you change something in Settings or pick a microphone from the menu rewrites the file in the same format, keeping every other key. The keys only the Python version used (`final_model`, `stream_model`, `output_mode` and `formatter_*`) are removed at launch. Native-only settings go under `"native"`: so far just `marker_timings` (`"accurate"` or `"rough"`, see Markers above).
-- `recordings/`: the same float WAVs and JSON the Python version wrote, byte for byte, with the same statuses and 30-day cleanup, and for dictations with marks the same `mark_count`, `screenshots` and `text` with markers (`decoded_text` is without). Native adds `app: "native"`, `engine`, `segments` (with no-speech and token probabilities) and `timings`, and from the History window and crash recovery `corrected_text` and `corrected_at` (Fix It), `retranscribed_text` (Transcribe Again), and `recovered`, `recovered_from: "partial"` and `recovery_attempts`. A `<id>.wav.partial` is the audio of a dictation in progress (see Crash safety). A near-silent clip of a second or more that Whisper turned into one of its silence phrases (the "Thank you." case) is saved as `skipped_low_level` with `skip_reason: "long_near_silent"` and what Whisper heard in `raw_transcript`; quiet real words in a clip that level still get typed.
+- `settings.json`: native reads `microphone_name`, `vocabulary`, `corrections`, and `audio_recording_enabled`, notices when the file changes (so a hand edit works too), and when you change something in Settings or pick a microphone from the menu rewrites the file in the same format, keeping every other key. The keys only the Python version used (`final_model`, `stream_model`, `output_mode` and `formatter_*`) are removed at launch. Native-only settings go under `"native"`; there are none at the moment. Keys left from drawing on screen (`draw_on_screen_enabled`, `"native": {"marker_timings"}`) are kept and ignored.
+- `recordings/`: the same float WAVs and JSON the Python version wrote, byte for byte, with the same statuses and 30-day cleanup. Dictations from when you could draw on screen also have `mark_count`, `screenshots` and `text` with `[n]` markers (`decoded_text` is without), and replay compares those without their markers. Native adds `app: "native"`, `engine`, `segments` (with no-speech and token probabilities) and `timings`, and from the History window and crash recovery `corrected_text` and `corrected_at` (Fix It), `retranscribed_text` (Transcribe Again), and `recovered`, `recovered_from: "partial"` and `recovery_attempts`. A `<id>.wav.partial` is the audio of a dictation in progress (see Crash safety). A near-silent clip of a second or more that Whisper turned into one of its silence phrases (the "Thank you." case) is saved as `skipped_low_level` with `skip_reason: "long_near_silent"` and what Whisper heard in `raw_transcript`; quiet real words in a clip that level still get typed.
 - `transcription-history.jsonl`: the same lines, mode `final_only`.
-- `screenshots/`: the same file names, so ones the Python version left are deleted after 7 days too.
 - `labelled/`: the recordings you fixed in History, WAV and JSON, kept for good.
 - `models/ggml-large-v3-turbo-q8_0.bin`: native's model.
 - `native-status.json`: what native is doing, for the command line. Only the copy holding the lock writes it.
@@ -131,8 +111,6 @@ None of these commands touch the keyboard tap, the microphone or the instance lo
 .build/release/voice-type-native tokens --model PATH
 ```
 
-`serve --word-timings` also times every word, as the app does for a dictation with marks, and returns the times with each segment.
-
 By default each command runs the whole pipeline the way the app does: the flatline and short-clip gates, the 0.3 s minimum, Whisper, the repetition loop guard, the "Thank you." check on near-silent clips, then your corrections. `--raw` runs Whisper alone (still with the word list prompt, since that's part of how it decodes).
 
 `serve` reads one JSON request per line, `{"id": ..., "path": FILE}`, where FILE is raw 16 kHz float32 (what the benchmark writes) or a WAV. It answers with the text, Whisper's time in `ms`, the segments, and the gate's status and levels. If a request carries `prompt_tokens` they're used as given; leave them out to test the native tokenizer.
@@ -144,16 +122,11 @@ python3 native/scripts/parity.py ~/dev/me/voice-type-benchmark /tmp/parity --mod
 python3 native/scripts/parity.py ~/dev/me/voice-type-benchmark /tmp/parity --model PATH
 ```
 
-Add `--word-timings` to either to check that timing words doesn't change the text.
-
-`scripts/marker-check.py`, which compared native's word timings with mlx-whisper's to check where markers land (PLAN.md's phase 2 result has the numbers), ran the Python version's code, so it went with it after commit 17e8220.
-
 ## Layout
 
-- `Sources/VoiceTypeCore`: every decision, with no AppKit, Core Audio or whisper in it, so it's all tested: settings, the word list prompt and tokenizer, the gates, loop guard and corrections, the recording archive and history (in the Python version's bytes), the controller's state machine, microphone readiness and stream logic, the recording spool and crash recovery, the History list and labels, the paste flow, the pill's timings, watchdogs and the restart backoff, the lock rules, the LaunchAgent and the status file. And drawing: stroke shapes, windows and coordinates (ScreenMarks), the ink tracker and mouse tap session, the capture worker, the screenshot store, marker placement, and drawing ink with Core Graphics.
-- `Sources/VoiceTypeImaging`: ports of Pillow's LANCZOS resize and FASTOCTREE quantizer and its palette PNG output, always built optimised (unoptimised Swift takes seconds per screenshot).
+- `Sources/VoiceTypeCore`: every decision, with no AppKit, Core Audio or whisper in it, so it's all tested: settings, the word list prompt and tokenizer, the gates, loop guard and corrections, the recording archive and history (in the Python version's bytes), the controller's state machine, microphone readiness and stream logic, the recording spool and crash recovery, the History list and labels, the paste flow, the pill's timings, watchdogs and the restart backoff, the lock rules, the LaunchAgent and the status file.
 - `Sources/VoiceTypeWhisper`: the whisper.cpp engine, the only code that calls whisper.cpp.
-- `Sources/VoiceTypeMac`: the thin layer that touches the Mac, behind VoiceTypeCore's protocols: the keyboard and mouse taps, Core Audio input and resampling, NSPasteboard, Accessibility and Cmd+V, launchctl, the menu bar item, the pill, the live ink, the window list and `screencapture`, and the settings and history windows (SwiftUI, built when opened and let go when closed). `voice-type-native snapshot-windows DIR` saves PNGs of them, from windows put behind all your others for a couple of seconds, so nothing takes focus.
+- `Sources/VoiceTypeMac`: the thin layer that touches the Mac, behind VoiceTypeCore's protocols: the keyboard tap, Core Audio input and resampling, NSPasteboard, Accessibility and Cmd+V, launchctl, the menu bar item, the pill, and the settings and history windows (SwiftUI, built when opened and let go when closed). `voice-type-native snapshot-windows DIR` saves PNGs of them, from windows put behind all your others for a couple of seconds, so nothing takes focus.
 - `Sources/voice-type-native`: one executable, the app when launched from its bundle and the command line otherwise.
 - `scripts/build-app.sh`: build, sign, install. `scripts/parity.py`: the benchmark check.
 

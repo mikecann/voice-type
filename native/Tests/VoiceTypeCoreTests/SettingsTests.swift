@@ -99,7 +99,6 @@ struct SettingsTests {
         #expect(try settings(old).corrections.pairs.map(\.wrong) == ["congress"])
         let file = SettingsFile(url: URL(fileURLWithPath: "/tmp/settings.json"), json: try OrderedJSONParser.parse(Data(old.utf8)))
         #expect(file.microphoneName == SettingsFile.defaultMicrophoneName)
-        #expect(file.markerTimings == .accurate)
         #expect(file.json["formatter_model"] == .string("qwen3"))
     }
 

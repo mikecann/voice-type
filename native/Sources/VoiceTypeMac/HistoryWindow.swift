@@ -1,6 +1,5 @@
 import AppKit
 import AVFoundation
-import ImageIO
 import SwiftUI
 import VoiceTypeCore
 
@@ -262,12 +261,6 @@ private struct HistoryRow: View {
                 if let fixed = item.correctedText, !item.text.isEmpty, fixed != item.text {
                     Text(item.text).strikethrough().foregroundStyle(.secondary).font(.callout)
                 }
-                if !item.screenshots.isEmpty {
-                    HStack(spacing: 6) {
-                        ForEach(item.screenshots, id: \.self) { Thumbnail(url: $0) }
-                    }
-                    .padding(.top, 2)
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 8) {
@@ -376,52 +369,3 @@ private struct FixItView: View {
     }
 }
 
-/// A screenshot at thumbnail size, decoded small so a long list doesn't hold full images.
-private struct Thumbnail: View {
-    let url: URL
-    @State private var image: NSImage?
-
-    var body: some View {
-        Button { NSWorkspace.shared.open(url) } label: {
-            Group {
-                if let image {
-                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
-                } else {
-                    Rectangle().fill(.quaternary)
-                }
-            }
-            .frame(width: 72, height: 46)
-            .clipShape(RoundedRectangle(cornerRadius: 4))
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(.separator))
-        }
-        .buttonStyle(.plain)
-        .help("Open the screenshot")
-        .task(id: url) { image = await ThumbnailCache.shared.image(for: url) }
-    }
-}
-
-final class ThumbnailCache: @unchecked Sendable {
-    static let shared = ThumbnailCache()
-    private let cache = NSCache<NSURL, NSImage>()
-
-    init() { cache.countLimit = 200 }
-
-    /// When the window closes, so the thumbnails don't stay in memory with it.
-    func removeAll() { cache.removeAllObjects() }
-
-    func image(for url: URL) async -> NSImage? {
-        if let hit = cache.object(forKey: url as NSURL) { return hit }
-        let image = await Task.detached(priority: .utility) { () -> NSImage? in
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-            let options: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceThumbnailMaxPixelSize: 160,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-            ]
-            guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
-            return NSImage(cgImage: thumbnail, size: NSSize(width: thumbnail.width / 2, height: thumbnail.height / 2))
-        }.value
-        if let image { cache.setObject(image, forKey: url as NSURL) }
-        return image
-    }
-}

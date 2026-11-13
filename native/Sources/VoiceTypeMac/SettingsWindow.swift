@@ -72,8 +72,6 @@ final class SettingsModel: ObservableObject {
     @Published var microphone = ""
     @Published var microphones: [Microphone] = []
     @Published var keepRecordings = true
-    @Published var drawOnScreen = true
-    @Published var accurateMarkers = true
     @Published var words: [Word] = []
     @Published var corrections: [Correction] = []
     @Published var permissions: [PermissionRow] = []
@@ -87,8 +85,6 @@ final class SettingsModel: ObservableObject {
     func reload(status: NativeStatus) {
         let file = SettingsFile.load()
         keepRecordings = file.audioRecordingEnabled
-        drawOnScreen = file.drawOnScreenEnabled
-        accurateMarkers = file.markerTimings == .accurate
         showLists(file)
         update(status: status)
         refreshMicrophones()
@@ -145,17 +141,6 @@ final class SettingsModel: ObservableObject {
     func setKeepRecordings(_ on: Bool) {
         keepRecordings = on
         actions.update({ $0.set("audio_recording_enabled", .bool(on)) }, nil)
-    }
-
-    func setDrawOnScreen(_ on: Bool) {
-        drawOnScreen = on
-        actions.update({ $0.set("draw_on_screen_enabled", .bool(on)) }, nil)
-    }
-
-    func setAccurateMarkers(_ accurate: Bool) {
-        accurateMarkers = accurate
-        let value = accurate ? SettingsFile.MarkerTimings.accurate : .rough
-        actions.update({ $0.setNative("marker_timings", .string(value.rawValue)) }, nil)
     }
 
     /// Adds a word typed into the box, unless it's blank or already there.
@@ -273,23 +258,6 @@ private struct GeneralSettings: View {
                         InfoButton(text: "Keeps each dictation's audio on this Mac for 30 days, for History's play button and Fix it. It's also written to disk while you talk, so a crash can't lose it.")
                     }
                 }
-                Toggle(isOn: Binding(get: { model.drawOnScreen }, set: { model.setDrawOnScreen($0) })) {
-                    HStack(spacing: 4) {
-                        Text("Draw on screen")
-                        InfoButton(text: "While holding the key, drag or click to mark the screen. A screenshot of each window you marked is pasted after the words, with [1], [2] where you drew.")
-                    }
-                }
-                Picker(selection: Binding(get: { model.accurateMarkers }, set: { model.setAccurateMarkers($0) })) {
-                    Text("Accurate").tag(true)
-                    Text("Rough").tag(false)
-                } label: {
-                    HStack(spacing: 4) {
-                        Text("Marker timing")
-                        InfoButton(text: "Accurate puts [1] after the word you were saying as you drew, using a second copy of the speech model (about 1 GB) while you draw and for 5 minutes after. Rough uses no extra memory, but the markers can land a few words out.")
-                    }
-                }
-                .pickerStyle(.segmented)
-                .disabled(!model.drawOnScreen)
             }
             Section {
                 HStack {

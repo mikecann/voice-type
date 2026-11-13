@@ -287,7 +287,6 @@ struct DictationHistoryTests {
         #expect(items[1].recordingID == typed)
         #expect(items[1].audioURL?.lastPathComponent == "\(typed).wav")
         #expect(items[1].durationSec == 1)
-        #expect(items[1].screenshots.isEmpty)  // deleted after 7 days
         #expect(items[2].recordingID == nil)
         #expect(items[2].audioURL == nil)
         // Reading never rewrites the history file.
@@ -296,7 +295,7 @@ struct DictationHistoryTests {
 
     @Test func aFixAndATranscribeAgainShowInsteadOfTheTypedText() {
         var item = HistoryItem(id: "x", recordingID: "x", date: Date(), text: "", outcome: .nothingTyped, durationSec: 1, audioURL: nil,
-                               screenshots: [], correctedText: nil, retranscribedText: "maybe this", recovered: false)
+                               correctedText: nil, retranscribedText: "maybe this", recovered: false)
         #expect(item.bestText == "maybe this")
         item.text = "typed"
         #expect(item.bestText == "typed")

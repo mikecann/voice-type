@@ -9,15 +9,13 @@ import Foundation
 /// holds 0.22 s and fades over 0.14 s. A paste that didn't land says "On your clipboard.
 /// ⌘V to paste" for 1.6 s and goes without a fade, or, when focus wasn't on a text box, what
 /// had it and what to do, for 3 s so there's time to read it. A paste that landed when
-/// macOS wouldn't let the old clipboard be read says so once, for 4 s, and marks drawn
-/// without Screen Recording say "No screenshots" for 1.6 s. Reduce Motion skips the tick
-/// animation and the fade.
+/// macOS wouldn't let the old clipboard be read says so once, for 4 s. Reduce Motion skips
+/// the tick animation and the fade.
 public enum PillState: String, Sendable {
     case rec
     case processing
     case done
     case pasteFailed = "paste_failed"
-    case hint
     /// Pasted, but the old clipboard couldn't be read, so it's gone.
     case clipboardNotKept = "clipboard_not_kept"
     /// A dictation cut off by a crash was transcribed after the restart.
@@ -43,7 +41,6 @@ public struct PillAppearance: Equatable, Sendable {
         case .rec: label = secondsLeft.map { " \($0)s" } ?? " REC"
         case .done: label = " \(text)"
         case .pasteFailed: label = " Clipboard"
-        case .hint: label = " No screenshots"
         case .processing: label = " ..."
         case .clipboardNotKept: label = " Pasted"
         case .recovered: label = " Recovered"
@@ -57,7 +54,7 @@ public struct PillAppearance: Equatable, Sendable {
 /// The parts of the pill that touch AppKit. Called on the main thread only.
 extension PillState {
     /// Feedback that holds without the tick or a fade.
-    var isNotice: Bool { self == .pasteFailed || self == .hint || self == .clipboardNotKept || self == .recovered }
+    var isNotice: Bool { self == .pasteFailed || self == .clipboardNotKept || self == .recovered }
 }
 
 public protocol PillSurface: AnyObject {
@@ -126,19 +123,6 @@ public final class PillController {
     public func showDone(words: Int) {
         show(.done, "\(words) word\(words == 1 ? "" : "s")")
     }
-
-    /// "12 words + 2 shots", or just "2 shots" when nothing was said.
-    public func showDone(words: Int, shots: Int) {
-        var label = "\(words) word\(words == 1 ? "" : "s")"
-        if shots > 0 {
-            let shotLabel = "\(shots) shot\(shots == 1 ? "" : "s")"
-            label = words > 0 ? "\(label) + \(shotLabel)" : shotLabel
-        }
-        show(.done, label)
-    }
-
-    /// Marks were drawn without Screen Recording, so the words went in alone.
-    public func showScreenRecordingHint() { show(.hint, "Allow Voice Type Native under Screen Recording in System Settings") }
 
     /// With `miss`, says what had focus instead of a text box, in the log's words.
     public func showPasteFailed(_ miss: FocusMiss? = nil) {
@@ -236,7 +220,7 @@ public final class PillController {
                 let target = Self.barMinHeight + (Self.barMaxHeight - Self.barMinHeight) * wave * 0.55
                 barHeights[i] = barHeights[i] * 0.6 + target * 0.4
             }
-        case .pasteFailed, .hint, .clipboardNotKept, .recovered:
+        case .pasteFailed, .clipboardNotKept, .recovered:
             barHeights = [Double](repeating: Self.barMinHeight, count: Self.barCount)
         }
         surface.setBarHeights(barHeights, color: PillAppearance(state: state, text: "").color)
